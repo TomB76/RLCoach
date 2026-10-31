@@ -1,0 +1,36 @@
+{
+  "name": "rl-coach",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Coach Rocket League : analyse tes games via l'API Stats locale du jeu, compare-les aux pros (ballchasing) et génère des recommandations priorisées.",
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "node --watch server/src/index.js",
+    "dev:web": "vite --config web/vite.config.js",
+    "build": "vite build --config web/vite.config.js",
+    "start": "node server/src/index.js",
+    "simulate": "node server/src/cli/simulate.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "rocket-league",
+    "coach",
+    "ballchasing",
+    "stats"
+  ],
+  "dependencies": {
+    "express": "^5.3.0",
+    "ws": "^8.22.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.2",
+    "concurrently": "^10.0.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "vite": "^8.3.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
