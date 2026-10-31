@@ -48,6 +48,8 @@ export default function CockpitView({ navigate }) {
   const local = snapshot?.localPlayer || null;
   const stats = local?.stats || {};
   const active = Boolean(snapshot?.active);
+  // Jeu libre : le jeu tourne mais aucune partie n'est lancée (rien n'est collecté).
+  const freeplay = Boolean(snapshot?.freeplay) && !active;
 
   const referenceMode = status?.ballchasing?.reference?.mode || 'global';
   const referencePlayer = status?.ballchasing?.reference?.player || null;
@@ -234,10 +236,10 @@ export default function CockpitView({ navigate }) {
           <Card className="live-card">
             <CardHead
               title="Match en cours"
-              hint={active ? `${snapshot?.arena || 'Arène inconnue'} · ${playlistName(playlists, snapshot?.playlist)}` : 'Aucun match en cours'}
+              hint={active ? `${snapshot?.arena || 'Arène inconnue'} · ${playlistName(playlists, snapshot?.playlist)}` : freeplay ? 'Jeu libre — aucune donnée collectée' : 'Aucun match en cours'}
               actions={
                 <Badge tone={active ? 'ok' : 'neutral'} dot>
-                  {active ? `en direct · ${clock(snapshot?.gameTimeSeconds)}` : 'en veille'}
+                  {active ? `en direct · ${clock(snapshot?.gameTimeSeconds)}` : freeplay ? 'jeu libre' : 'en veille'}
                 </Badge>
               }
             />
@@ -297,6 +299,12 @@ export default function CockpitView({ navigate }) {
                   )}
                 </div>
               </>
+            ) : freeplay ? (
+              <EmptyState
+                icon="live"
+                title="Jeu libre détecté"
+                description="Aucune partie lancée : rien n’est collecté ni analysé. Lance un match (ou une démo) pour voir le cockpit s’activer."
+              />
             ) : (
               <EmptyState
                 icon="live"

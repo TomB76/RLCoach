@@ -11,7 +11,7 @@ Coach Rocket League local : l'app analyse tes matchs, compare **tes statistiques
 | Étape | Détail |
 |---|---|
 | 1. Captation | Connexion à l'**API Stats locale du jeu** (`rocketleague.com/developer/stats-api`) : le jeu diffuse le match en JSON sur `127.0.0.1:49123` (WebSocket ou TCP). |
-| 2. Analyse | Le tracker transforme ce flux en **21 métriques** alignées sur le schéma ballchasing : boost, mouvement, positionnement, production, démolitions, touches. |
+| 2. Analyse | Le tracker transforme ce flux en **21 métriques** alignées sur le schéma ballchasing : boost, mouvement, positionnement, production, démolitions, touches. Le **jeu libre est ignoré** (`Game.bReplicatedHasBegunPlay === false`) : rien n'est collecté ni affiché tant qu'aucune partie n'est lancée. |
 | 3. Référence pro | Au choix : **coach global** (tous les pros agrégés) ou **un pro précis**, dont seuls les replays comptent. Distributions p10 → p90 récupérées via l'**API ballchasing** (`ballchasing.com/doc/api`). |
 | 4. Diagnostic | Chaque métrique est positionnée en **percentile** dans la distribution pro, puis convertie en performance 0–100 (direction de la métrique respectée). |
 | 5. Coaching | Les faiblesses sont triées par **impact = poids métier × gravité de l'écart**, traduites en diagnostics, exercices et objectifs (palier p25 pro). |
@@ -171,6 +171,8 @@ WebSocket /live + REST ◀──────────────────
 - Détection des gros/petits pads approximée par le delta de jauge de boost.
 - Les repères de démarrage (`source: seed`) sont des ordres de grandeur par mode, pas une cohorte mesurée : l'interface l'indique explicitement et invite à actualiser via ballchasing.
 - Pas de détection de rang (l'API Stats ne le fournit pas), donc un seul référentiel pro par mode.
+- **Jeu libre** : l'API Stats diffuse aussi le freeplay. Le tracker le reconnaît (`bReplicatedHasBegunPlay === false`), n'accumule aucune statistique, jette les données partielles et ne crée aucun match. Le cockpit affiche alors « Jeu libre détecté ». Si le champ est absent (versions du jeu qui ne l'envoient pas), la détection de partie reste inchangée.
+- **Référence mono-joueur par alias** : ballchasing peut afficher un même compte sous plusieurs pseudos (« M0nkey M00n » → « L4rpey M00n », « SH33PY M00N »). La résolution se fait par nom exact, puis par similarité de pseudo pour les identifiants du même compte (seuil 0,5). Si rien ne correspond, l'erreur liste les pseudos réellement rencontrés.
 
 ---
 

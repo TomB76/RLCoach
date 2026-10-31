@@ -252,6 +252,7 @@ function buildStatus() {
     rl: rlClient.getStatus(),
     tracker: {
       tracking: snapshot.active,
+      freeplay: snapshot.freeplay === true,
       gameTimeSeconds: snapshot.gameTimeSeconds,
       teamScores: snapshot.teamScores,
       playlist: snapshot.playlist,

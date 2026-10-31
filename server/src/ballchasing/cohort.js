@@ -48,6 +48,139 @@ export function normalizeName(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+/** Identifiant stable d'un joueur ballchasing (`{platform, id}` -> `platform:id`). */
+export function playerKey(id) {
+  if (!id) return null;
+  if (typeof id === 'string') return id;
+  if (typeof id === 'object' && id.id) return `${id.platform || 'unknown'}:${id.id}`;
+  return null;
+}
+
+/**
+ * Extrait les joueurs d'un replay ballchasing.
+ *
+ * L'API ne renvoie PAS de tableau `players` a la racine : les rosters sont dans
+ * `replay.blue.players` et `replay.orange.players` (chacun avec ses `stats`,
+ * `mvp` et `id {platform,id}`). C'est la cause du bug « aucun replay exploitable ».
+ */
+export function extractPlayers(replay) {
+  const rows = [];
+  for (const [side, team] of [
+    ['blue', 0],
+    ['orange', 1],
+  ]) {
+    const roster = replay?.[side]?.players;
+    if (!Array.isArray(roster)) continue;
+    for (const player of roster) {
+      if (!player) continue;
+      const name = String(player.name || '').trim() || 'Inconnu';
+      rows.push({
+        name,
+        key: playerKey(player.id) || `name:${normalizeName(name)}`,
+        team,
+        stats: player.stats || null,
+        mvp: Boolean(player.mvp || player.stats?.core?.mvp),
+      });
+    }
+  }
+  return rows;
+}
+
+/** Buts d'une equipe dans un replay ballchasing (blue/orange). */
+export function teamGoals(replay, side) {
+  const core = replay?.[side]?.stats?.core;
+  if (!core) return 0;
+  if (Number.isFinite(core.goals_for)) return core.goals_for;
+  if (Number.isFinite(core.goals)) return core.goals;
+  return 0;
+}
+
+/** Similarite de pseudos par jetons communs (0 -> 1). */
+export function nameSimilarity(a, b) {
+  const tokenize = (value) =>
+    normalizeName(value)
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .split(' ')
+      .filter(Boolean);
+  const left = tokenize(a);
+  const right = tokenize(b);
+  if (!left.length || !right.length) return 0;
+  const rightSet = new Set(right);
+  const common = left.filter((token) => rightSet.has(token)).length;
+  return common / Math.max(left.length, right.length);
+}
+
+/** Seuil de similarite en dessous duquel on refuse d'attribuer un pseudo. */
+export const ALIAS_THRESHOLD = 0.5;
+
+/**
+ * Identifie le joueur cible dans les rosters.
+ *
+ * Ballchasing associe un joueur a plusieurs noms de compte (« M0nkey M00n »
+ * apparait par exemple comme « L4rpey M00n » ou « SH33PY M00N »). On resout :
+ *  1. par nom exact ;
+ *  2. sinon par alias : tous les ids dont un nom atteint le seuil de similarite ;
+ *  3. sinon echec explicite (`method: 'none'`) en listant les pseudos rencontres.
+ */
+export function resolveTargetPlayer(rosters, playerName) {
+  const wanted = normalizeName(playerName);
+  const candidates = new Map();
+
+  for (const roster of rosters) {
+    for (const player of roster) {
+      if (!candidates.has(player.key)) {
+        candidates.set(player.key, { key: player.key, names: new Set(), replays: 0 });
+      }
+      const entry = candidates.get(player.key);
+      entry.names.add(player.name);
+      entry.replays += 1;
+    }
+  }
+
+  const seenNames = [...new Set([...candidates.values()].flatMap((entry) => [...entry.names]))];
+
+  const exact = [...candidates.values()].filter((entry) =>
+    [...entry.names].some((name) => normalizeName(name) === wanted),
+  );
+  if (exact.length) {
+    return {
+      method: 'exact',
+      keys: new Set(exact.map((entry) => entry.key)),
+      matchedNames: [...new Set(exact.flatMap((entry) => [...entry.names]))],
+      seenNames,
+      similarity: 1,
+    };
+  }
+
+  const scored = [...candidates.values()]
+    .map((entry) => ({
+      ...entry,
+      similarity: Math.max(...[...entry.names].map((name) => nameSimilarity(name, playerName))),
+    }))
+    .sort((a, b) => b.similarity - a.similarity);
+
+  const best = scored[0]?.similarity ?? 0;
+  if (best >= ALIAS_THRESHOLD) {
+    const retained = scored.filter((entry) => entry.similarity >= ALIAS_THRESHOLD);
+    return {
+      method: 'alias',
+      keys: new Set(retained.map((entry) => entry.key)),
+      matchedNames: [...new Set(retained.flatMap((entry) => [...entry.names]))],
+      seenNames,
+      similarity: Math.round(best * 100) / 100,
+    };
+  }
+
+  return {
+    method: 'none',
+    keys: new Set(),
+    matchedNames: [],
+    seenNames,
+    similarity: Math.round(best * 100) / 100,
+  };
+}
+
 /**
  * Clé de cache d'une référence.
  * - global  → `cohort:<playlist>`
@@ -102,52 +235,58 @@ export function buildCohortFromReplays(
   replays,
   { playlist, source = 'ballchasing', mode = 'global', playerName = null } = {},
 ) {
-  const buckets = new Map(METRICS.map((metric) => [metric.key, []]));
-  const players = new Map(); // id/nom → { name, replays:Set, teamSize }
-  const target = playerName ? normalizeName(playerName) : null;
-  let usableReplays = 0;
-  let playerMatchCount = 0;
-  const replayIndex = [];
-
+  // 1) Ne garder que les replays exploitables (rosters lus dans blue/orange).
+  const usable = [];
   for (const replay of replays) {
     if (!replay || replay.status === 'pending') continue;
     const duration = Number(replay.duration) || 0;
-    if (duration < 45) continue; // matchs trop courts / bots
-    const teamSize = Number(replay.team_size) || 2;
-    const roster = Array.isArray(replay.players) ? replay.players : [];
-    if (roster.length < teamSize * 2) continue;
+    if (duration < 45) continue;
+    const roster = extractPlayers(replay);
+    if (roster.length < 2) continue;
+    usable.push({
+      replay,
+      duration,
+      teamSize: Number(replay.team_size) || Math.max(1, Math.floor(roster.length / 2)),
+      roster,
+    });
+  }
 
+  // 2) En mode mono-joueur, identifier le joueur (nom exact ou alias connus).
+  const isPlayerMode = mode === 'player';
+  const resolution = isPlayerMode
+    ? resolveTargetPlayer(usable.map((entry) => entry.roster), playerName)
+    : { method: 'global', keys: null, matchedNames: [], seenNames: [], similarity: null };
+
+  const buckets = new Map(METRICS.map((metric) => [metric.key, []]));
+  const players = new Map();
+  let usableReplays = 0;
+  const replayIndex = [];
+
+  for (const { replay, duration, teamSize, roster } of usable) {
     let counted = false;
     for (const player of roster) {
-      const raw = player?.stats;
-      if (!raw?.core || !raw?.movement || !raw?.positioning) continue;
-
-      const name = String(player.name || '').trim();
-      const isTarget = target ? normalizeName(name) === target : true;
-      const stats = normalizeBallchasingStats(raw, duration);
-
-      if (isTarget) {
-        for (const metric of METRICS) {
-          if (teamSize === 1 && metric.key === 'positioning.avgDistanceToTeammates') continue;
-          if (teamSize === 1 && metric.key === 'core.assistsPerMinute') continue;
-          const value = metricValue(metric, stats, duration);
-          if (Number.isFinite(value)) buckets.get(metric.key).push(value);
-        }
-        counted = true;
-        if (target) playerMatchCount += 1;
+      if (!players.has(player.key)) {
+        players.set(player.key, { name: player.name, id: player.key, replays: new Set(), matches: 0, lastSeen: null });
       }
+      const entry = players.get(player.key);
+      entry.replays.add(replay.id);
+      if (!entry.lastSeen || String(replay.date) > String(entry.lastSeen)) entry.lastSeen = replay.date;
 
-      // index des joueurs rencontrés (sert au sélecteur de coach)
-      if (name) {
-        const key = normalizeName(name);
-        if (!players.has(key)) {
-          players.set(key, { name, id: player.id || null, replays: new Set(), matches: 0, lastSeen: null });
-        }
-        const entry = players.get(key);
-        entry.replays.add(replay.id);
-        if (isTarget) entry.matches += 1;
-        if (!entry.lastSeen || String(replay.date) > String(entry.lastSeen)) entry.lastSeen = replay.date;
+      const isTarget = !isPlayerMode || (resolution.keys && resolution.keys.has(player.key));
+      if (!isTarget) continue;
+
+      const stats = player.stats;
+      if (!stats?.core || !stats?.movement || !stats?.positioning) continue;
+
+      const normalized = normalizeBallchasingStats(stats, duration);
+      for (const metric of METRICS) {
+        if (teamSize === 1 && metric.key === 'positioning.avgDistanceToTeammates') continue;
+        if (teamSize === 1 && metric.key === 'core.assistsPerMinute') continue;
+        const value = metricValue(metric, normalized, duration);
+        if (Number.isFinite(value)) buckets.get(metric.key).push(value);
       }
+      entry.matches += 1;
+      counted = true;
     }
 
     if (counted) {
@@ -163,15 +302,32 @@ export function buildCohortFromReplays(
   }
 
   const metrics = {};
-  let sampleSize = 0;
   for (const metric of METRICS) {
-    const values = buckets.get(metric.key) || [];
-    const summary = summarize(values);
-    if (!summary) continue;
-    metrics[metric.key] = summary;
-    sampleSize = Math.max(sampleSize, summary.count);
+    const summary = summarize(buckets.get(metric.key) || []);
+    if (summary) metrics[metric.key] = summary;
   }
-  const totalSamples = Object.values(metrics).reduce((acc, m) => acc + (m.count || 0), 0);
+  const totalSamples = Object.values(metrics).reduce((acc, item) => acc + (item.count || 0), 0);
+  const performances = [...players.values()].reduce((acc, entry) => acc + entry.matches, 0);
+
+  const quality = usableReplays >= 15 ? 'good' : usableReplays >= 5 ? 'fair' : 'low';
+  const qualityNote =
+    quality === 'good'
+      ? ''
+      : quality === 'fair'
+        ? ' Échantillon modéré : les percentiles restent indicatifs.'
+        : ' Échantillon faible : interprète les percentiles avec prudence (idéalement 15 replays ou plus).';
+
+  const aliasNote =
+    isPlayerMode && resolution.method === 'alias'
+      ? ` Pseudos rencontrés pour ce joueur : ${resolution.matchedNames.join(', ')} (alias du même compte ballchasing).`
+      : '';
+
+  const note =
+    (isPlayerMode
+      ? `Référence mono-joueur : ${usableReplays} replay(s) pour ${playerName} (${performances} performance(s) mesurée(s)).`
+      : `Cohorte globale construite sur ${usableReplays} replays pro (${players.size} joueurs).`) +
+    aliasNote +
+    qualityNote;
 
   const playerIndex = [...players.values()]
     .map((entry) => ({
@@ -183,43 +339,29 @@ export function buildCohortFromReplays(
     }))
     .sort((a, b) => b.replays - a.replays);
 
-  const isPlayerMode = mode === 'player';
-  const label = isPlayerMode ? playerName : 'Pros (cohorte globale)';
-
-  /**
-   * Fiabilité de l'échantillon : une cohorte mono-joueur peut reposer sur peu de
-   * replays, ce qui rend les percentiles grossiers. On l'expose explicitement.
-   */
-  const quality = usableReplays >= 15 ? 'good' : usableReplays >= 5 ? 'fair' : 'low';
-  const qualityNote =
-    quality === 'good'
-      ? ''
-      : quality === 'fair'
-        ? ' Échantillon modéré : les percentiles restent indicatifs.'
-        : ' Échantillon faible : interprète les percentiles avec prudence (idéalement 15 replays ou plus).';
-
-  const note =
-    (isPlayerMode
-      ? `Référence mono-joueur : ${usableReplays} replay(s) de ${playerName} (${playerMatchCount} performance(s) mesurée(s)).`
-      : `Cohorte globale construite sur ${usableReplays} replays pro (${players.size} joueurs) récupérés via l'API ballchasing.`) +
-    qualityNote;
-
   return {
     playlist,
     playlistLabel: PLAYLISTS[playlist]?.label || playlist,
     source,
     mode,
     player: isPlayerMode ? playerName : null,
-    label,
+    label: isPlayerMode ? playerName : 'Pros (cohorte globale)',
     quality,
     playerAvailable: isPlayerMode ? usableReplays > 0 : null,
     isDemo: false,
     updatedAt: new Date().toISOString(),
     sampleSize: totalSamples,
-    playersAnalyzed: isPlayerMode ? new Set([normalizeName(playerName)]).size : players.size,
+    playersAnalyzed: isPlayerMode ? (resolution.keys?.size ?? 0) : players.size,
     replaysAnalyzed: usableReplays,
     replays: replayIndex,
     playerIndex,
+    resolution: {
+      method: resolution.method,
+      similarity: resolution.similarity,
+      matchedNames: resolution.matchedNames,
+      seenNames: resolution.seenNames.slice(0, 12),
+      unresolved: isPlayerMode && resolution.method === 'none',
+    },
     metrics,
     note,
   };
@@ -322,11 +464,7 @@ export async function refreshCohort({
     });
 
     if (!cohort.replaysAnalyzed) {
-      throw new Error(
-        isPlayerMode
-          ? `Les replays récupérés ne contiennent pas de statistiques exploitables pour « ${player} ».`
-          : "Les replays récupérés ne contiennent pas assez de statistiques exploitables.",
-      );
+      throw new Error(buildEmptyCohortMessage({ isPlayerMode, player, replays, list, cohort }));
     }
 
     setProCache(cohortKey(playlist, mode, player), cohort);
@@ -389,26 +527,37 @@ export function listKnownPlayers(playlist = 'ranked-doubles') {
  */
 export function replayToMatch(replay, { playerName = '', playlistHint = null } = {}) {
   const duration = Number(replay.duration) || 0;
-  const blueGoals = Number(replay.blue?.goals) || 0;
-  const orangeGoals = Number(replay.orange?.goals) || 0;
+  const blueGoals = teamGoals(replay, 'blue');
+  const orangeGoals = teamGoals(replay, 'orange');
   const winner = blueGoals === orangeGoals ? null : blueGoals > orangeGoals ? 0 : 1;
-  const roster = Array.isArray(replay.players) ? replay.players : [];
+  const roster = extractPlayers(replay);
 
-  const players = roster.map((player) => {
-    const team = player.team === 'orange' ? 1 : 0;
-    const stats = normalizeBallchasingStats(player.stats || {}, duration);
-    return {
-      id: player.id || player.name,
-      name: player.name,
-      team,
-      isLocal: Boolean(playerName && normalizeName(player.name) === normalizeName(playerName)),
-      stats,
-      rlCoachScore: null,
-      grade: null,
-    };
-  });
+  // Joueur local : nom exact, sinon alias le plus proche (même seuil que la cohorte).
+  const wanted = normalizeName(playerName);
+  let localKey = null;
+  if (playerName) {
+    const exact = roster.find((player) => normalizeName(player.name) === wanted);
+    if (exact) {
+      localKey = exact.key;
+    } else {
+      const best = roster
+        .map((player) => ({ player, score: nameSimilarity(player.name, playerName) }))
+        .sort((a, b) => b.score - a.score)[0];
+      if (best && best.score >= ALIAS_THRESHOLD) localKey = best.player.key;
+    }
+  }
 
-  const local = players.find((p) => p.isLocal) || null;
+  const players = roster.map((player) => ({
+    id: player.key,
+    name: player.name,
+    team: player.team,
+    isLocal: player.key === localKey,
+    stats: normalizeBallchasingStats(player.stats || {}, duration),
+    rlCoachScore: null,
+    grade: null,
+  }));
+
+  const local = players.find((player) => player.isLocal) || null;
   const result = winner === null || !local ? 'unknown' : local.team === winner ? 'win' : 'loss';
 
   return {
@@ -521,4 +670,24 @@ function normalizeBallchasingStats(stats = {}, duration = 0) {
       samples: 0,
     },
   };
+}
+
+/**
+ * Message d'erreur explicite quand aucun replay n'est exploitable.
+ *
+ * On distingue les causes pour ne pas laisser l'utilisateur devant un message
+ * muet : replays illisibles, stats absentes, ou joueur introuvable dans les
+ * rosters (on liste alors les pseudos réellement rencontrés).
+ */
+function buildEmptyCohortMessage({ isPlayerMode, player, replays, list, cohort }) {
+  const read = replays.length;
+  const total = Array.isArray(list) ? list.length : read;
+  if (!isPlayerMode) {
+    return `Les replays récupérés ne contiennent pas assez de statistiques exploitables (${read} replay(s) lu(s) sur ${total}). Réessaie dans un instant ou choisis un autre mode.`;
+  }
+  const seen = cohort?.resolution?.seenNames || [];
+  const seenText = seen.length
+    ? ` Pseudos rencontrés : ${seen.slice(0, 8).join(', ')}.`
+    : '';
+  return `Aucun replay exploitable pour « ${player} » (${read} replay(s) lu(s) sur ${total}).${seenText} Vérifie l'orthographe exacte du pseudo tel qu'il apparaît sur ballchasing.`;
 }

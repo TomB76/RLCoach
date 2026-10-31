@@ -170,6 +170,7 @@ export class MatchTracker {
     this.possessionTeam = null;
     this.lastActive = [];
     this.lastTick = null;
+    this.freeplay = false;
   }
 
   // ------------------------------------------------------------------
@@ -276,8 +277,39 @@ export class MatchTracker {
   // Frame de jeu : le gros des métriques
   // ------------------------------------------------------------------
 
+  /**
+   * Vrai quand le jeu tourne sans partie lancée (jeu libre).
+   *
+   * L'API Stats envoie `Game.bReplicatedHasBegunPlay: false` pendant le
+   * freeplay et `true` dès qu'une partie démarre. Toute autre valeur
+   * (`undefined`) est ignorée pour ne pas bloquer les versions du jeu qui
+   * n'envoient pas ce champ : la détection de partie reste inchangée.
+   */
+  isFreeplayFrame(game) {
+    return game?.bReplicatedHasBegunPlay === false;
+  }
+
+  /**
+   * Entre en jeu libre : aucune donnée n'est collectée et l'état accumulé est
+   * effacé, pour qu'une partie précédente ne soit ni finalisée ni polluée.
+   */
+  enterFreeplay() {
+    if (this.match.players.size > 0 || this.match.gameTimeSeconds > 0) {
+      this.reset();
+    }
+    if (!this.freeplay) {
+      this.freeplay = true;
+      this.pushEvent('freeplay', 'Jeu libre détecté — aucune statistique collectée');
+    }
+  }
+
   handleUpdateState(state) {
     const game = state.Game || {};
+    if (this.isFreeplayFrame(game)) {
+      this.enterFreeplay();
+      return;
+    }
+    this.freeplay = false;
     const time = safeNumber(game.TimeSeconds ?? game.Time ?? this.match.gameTimeSeconds, this.match.gameTimeSeconds);
     this.match.gameTimeSeconds = time;
     this.match.lastTimeSeconds = time;
@@ -650,6 +682,24 @@ export class MatchTracker {
 
   /** Snapshot live (léger) pour l'UI. */
   snapshot() {
+    if (this.freeplay) {
+      // Aucune partie lancée : on n'expose ni joueurs ni scores, même si l'API
+      // continue d'envoyer des frames de jeu libre.
+      return {
+        active: false,
+        freeplay: true,
+        guid: this.match.guid,
+        startedAt: this.match.startedAt,
+        arena: this.match.arena,
+        playlist: this.match.playlist,
+        gameTimeSeconds: 0,
+        teamScores: { 0: 0, 1: 0 },
+        players: [],
+        localPlayer: null,
+        recentEvents: this.match.events.slice(-14),
+        goals: [],
+      };
+    }
     const players = [];
     for (const player of this.match.players.values()) {
       const stats = this.computePlayerStats(player);
@@ -664,6 +714,7 @@ export class MatchTracker {
     const local = players.find((p) => p.isLocal) || null;
     return {
       active: this.match.players.size > 0 && !this.match.finished,
+      freeplay: false,
       guid: this.match.guid,
       startedAt: this.match.startedAt,
       arena: this.match.arena,
@@ -679,6 +730,10 @@ export class MatchTracker {
 
   /** Construit l'enregistrement final du match. */
   finalize(endData = {}) {
+    if (this.freeplay) {
+      this.pushEvent('discard', 'Jeu libre : aucune donnée collectée');
+      return null;
+    }
     const duration = round(this.match.gameTimeSeconds, 1);
     if (!this.match.players.size || duration < 5) {
       this.pushEvent('discard', 'Match ignoré (trop court ou aucun joueur détecté)');

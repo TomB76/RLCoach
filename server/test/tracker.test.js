@@ -151,3 +151,99 @@ test('tracker : score des équipes et résultat', () => {
   assert.equal(final.result, 'win');
   assert.deepEqual(final.teamScores, { 0: 2, 1: 1 });
 });
+
+/** Frame UpdateState minimale ; `begunPlay` reproduit le champ du jeu. */
+function updateStateFrame({ time, begunPlay, score = [0, 0], boost = 50 }) {
+  const game = {
+    TimeSeconds: time,
+    Teams: [
+      { TeamNum: 0, Score: score[0] },
+      { TeamNum: 1, Score: score[1] },
+    ],
+  };
+  if (begunPlay !== undefined) game.bReplicatedHasBegunPlay = begunPlay;
+  return {
+    Event: 'UpdateState',
+    Data: JSON.stringify({
+      Game: game,
+      Ball: { Location: { X: 0, Y: 0, Z: 93 } },
+      Players: [
+        { Name: 'Toi', PrimaryId: 'p1', TeamNum: 0, Boost: boost, Speed: 1200, Location: { X: 0, Y: -1000, Z: 17 }, bOnGround: true },
+        { Name: 'Adv', PrimaryId: 'p2', TeamNum: 1, Boost: boost, Speed: 1200, Location: { X: 0, Y: 1000, Z: 17 }, bOnGround: true },
+      ],
+    }),
+  };
+}
+
+function matchCreatedMessage(guid, players = [
+  { Name: 'Toi', PrimaryId: 'p1', TeamNum: 0 },
+  { Name: 'Adv', PrimaryId: 'p2', TeamNum: 1 },
+]) {
+  return { Event: 'MatchCreated', Data: JSON.stringify({ MatchGuid: guid, Players: players }) };
+}
+
+test('tracker : le jeu libre ne collecte aucune statistique', () => {
+  const tracker = new MatchTracker({ playerName: 'Toi' });
+  tracker.ingest(matchCreatedMessage('fp'));
+  for (let i = 1; i <= 60; i += 1) tracker.ingest(updateStateFrame({ time: i, begunPlay: false }));
+
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.freeplay, true, 'le jeu libre doit être signalé');
+  assert.equal(snapshot.active, false, 'aucun match actif en jeu libre');
+  assert.deepEqual(snapshot.players, [], 'aucun joueur exposé');
+  assert.equal(snapshot.localPlayer, null);
+  assert.deepEqual(snapshot.teamScores, { 0: 0, 1: 0 });
+  assert.equal(snapshot.gameTimeSeconds, 0, 'le chrono ne doit pas avancer');
+  assert.equal(tracker.finalize({}), null, 'aucun match ne doit être produit');
+});
+
+test('tracker : sans bReplicatedHasBegunPlay, la détection reste inchangée', () => {
+  // Non-régression : les versions du jeu qui n'envoient pas le champ doivent
+  // continuer à produire un match normal.
+  const tracker = new MatchTracker({ playerName: 'Toi' });
+  tracker.ingest(matchCreatedMessage('legacy'));
+  for (let i = 1; i <= 60; i += 1) tracker.ingest(updateStateFrame({ time: i }));
+
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.freeplay, false);
+  assert.equal(snapshot.active, true);
+  assert.equal(snapshot.players.length, 2);
+  assert.ok(tracker.finalize({ Winner: 0 }), 'le match doit être finalisé normalement');
+});
+
+test('tracker : sortir du jeu libre relance une détection normale', () => {
+  const tracker = new MatchTracker({ playerName: 'Toi' });
+  for (let i = 1; i <= 20; i += 1) tracker.ingest(updateStateFrame({ time: i, begunPlay: false }));
+  assert.equal(tracker.snapshot().freeplay, true);
+
+  tracker.ingest(matchCreatedMessage('m2'));
+  for (let i = 1; i <= 120; i += 1) tracker.ingest(updateStateFrame({ time: i, begunPlay: true }));
+
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.freeplay, false, 'le jeu libre doit se terminer au coup d’envoi');
+  assert.equal(snapshot.active, true);
+  assert.equal(snapshot.players.length, 2);
+  assert.ok(tracker.finalize({ Winner: 0 }), 'le match suivant doit être finalisé');
+});
+
+test('tracker : passer en jeu libre en cours de match abandonne les données', () => {
+  const tracker = new MatchTracker({ playerName: 'Toi' });
+  let ended = 0;
+  tracker.onMatchEnded = () => {
+    ended += 1;
+  };
+
+  tracker.ingest(matchCreatedMessage('m3'));
+  for (let i = 1; i <= 30; i += 1) tracker.ingest(updateStateFrame({ time: i, begunPlay: true }));
+  assert.equal(tracker.snapshot().active, true, 'le match doit d’abord être actif');
+
+  // Retour au jeu libre sans MatchEnded : les données partielles sont jetées.
+  for (let i = 31; i <= 40; i += 1) tracker.ingest(updateStateFrame({ time: i, begunPlay: false }));
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.freeplay, true);
+  assert.equal(snapshot.active, false);
+  assert.equal(snapshot.players.length, 0, 'les stats du match interrompu sont effacées');
+
+  tracker.ingest({ Event: 'MatchEnded', Data: JSON.stringify({ Winner: 0 }) });
+  assert.equal(ended, 0, 'aucun match ne doit être enregistré depuis le jeu libre');
+});

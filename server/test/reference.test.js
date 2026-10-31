@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildCohortFromReplays, cohortKey, slugify } from '../src/ballchasing/cohort.js';
+import { buildCohortFromReplays, cohortKey, replayToMatch, slugify } from '../src/ballchasing/cohort.js';
 import { buildSeedCohort } from '../src/coach/seedBenchmarks.js';
 import { coachMatch, coachOverview, compareToCohort } from '../src/coach/engine.js';
 import { buildSimulatedMatch } from '../src/rl/simulator.js';
@@ -70,20 +70,36 @@ function statsFor(playerName, boostZero, bpm) {
   };
 }
 
-function replayFixture(id, entries) {
+/** Joueur au format réel de l'API ballchasing (`blue.players[]` / `orange.players[]`). */
+function playerFixture({ name, boostZero, bpm, team, accountId }) {
+  return {
+    name,
+    id: { platform: 'steam', id: accountId || `steam-${name.toLowerCase()}` },
+    mvp: false,
+    stats: statsFor(name, boostZero, bpm),
+  };
+}
+
+/**
+ * Replay au format réel de `GET /replays/{id}`.
+ *
+ * Il n'existe PAS de tableau `players` à la racine : les rosters sont dans
+ * `blue.players` / `orange.players`, et les buts d'équipe dans
+ * `blue.stats.core.goals`. C'est exactement ce que le parseur doit lire.
+ */
+function replayFixture(id, entries, { blueGoals = 2, orangeGoals = 1 } = {}) {
+  const sides = { blue: [], orange: [] };
+  for (const entry of entries) {
+    sides[entry.team === 'orange' ? 'orange' : 'blue'].push(playerFixture(entry));
+  }
   return {
     id,
     date: '2024-05-01T00:00:00Z',
     playlist: 'ranked-doubles',
     duration: 300,
     team_size: 2,
-    blue: { goals: 2 },
-    orange: { goals: 1 },
-    players: entries.map(({ name, boostZero, bpm, team }) => ({
-      name,
-      team,
-      stats: statsFor(name, boostZero, bpm),
-    })),
+    blue: { stats: { core: { goals: blueGoals } }, players: sides.blue },
+    orange: { stats: { core: { goals: orangeGoals } }, players: sides.orange },
   };
 }
 
@@ -155,6 +171,92 @@ test('index des joueurs : sert de source au sélecteur de coach', () => {
     assert.equal(entry.replays, 2);
     assert.ok(entry.lastSeen);
   }
+});
+
+test('cohorte mono-joueur : un même compte sous plusieurs pseudos reste reconnu (alias)', () => {
+  // Cas réel : « M0nkey M00n » apparaît comme « L4rpey M00n » ou « SH33PY M00N »
+  // sur certains replays, mais toujours avec le même id de compte ballchasing.
+  const aliased = [
+    replayFixture('k1', [
+      { name: 'L4rpey M00n', boostZero: 2, bpm: 420, team: 'blue', accountId: 'steam-m0nkey' },
+      { name: 'Equipier A', boostZero: 9, bpm: 300, team: 'blue' },
+      { name: 'Rival A', boostZero: 8, bpm: 460, team: 'orange' },
+      { name: 'Rival B', boostZero: 7, bpm: 470, team: 'orange' },
+    ]),
+    replayFixture('k2', [
+      { name: 'SH33PY M00N', boostZero: 4, bpm: 430, team: 'blue', accountId: 'steam-m0nkey' },
+      { name: 'Equipier A', boostZero: 9, bpm: 300, team: 'blue' },
+      { name: 'Rival A', boostZero: 8, bpm: 460, team: 'orange' },
+      { name: 'Rival B', boostZero: 7, bpm: 470, team: 'orange' },
+    ]),
+  ];
+
+  const cohort = buildCohortFromReplays(aliased, {
+    playlist: 'ranked-doubles',
+    mode: 'player',
+    playerName: 'M0nkey M00n',
+  });
+
+  assert.equal(cohort.replaysAnalyzed, 2, 'les deux pseudos comptent pour le même joueur');
+  assert.equal(cohort.playerAvailable, true);
+  assert.equal(cohort.resolution.method, 'alias');
+  assert.equal(cohort.resolution.unresolved, false);
+  assert.equal(cohort.metrics['boost.percentZeroBoost'].count, 2, 'une performance par replay');
+  assert.equal(cohort.metrics['boost.percentZeroBoost'].p50, 3, 'médiane de 2 et 4');
+  assert.match(cohort.note, /L4rpey M00n/);
+  assert.match(cohort.note, /SH33PY M00N/);
+});
+
+test('cohorte mono-joueur : les pseudos rencontrés sont listés si le joueur est absent', () => {
+  const cohort = buildCohortFromReplays(replays, {
+    playlist: 'ranked-doubles',
+    mode: 'player',
+    playerName: 'M0nkey M00n',
+  });
+  assert.equal(cohort.replaysAnalyzed, 0);
+  assert.equal(cohort.playerAvailable, false);
+  assert.equal(cohort.resolution.method, 'none');
+  assert.equal(cohort.resolution.unresolved, true);
+  assert.deepEqual(cohort.resolution.seenNames.sort(), ['Atow', 'Rw9', 'Vatira', 'Zen']);
+});
+
+test('replayToMatch : lit les rosters blue/orange et les buts d’équipe', () => {
+  const replay = replayFixture(
+    'bc-1',
+    [
+      { name: 'Vatira', boostZero: 2, bpm: 420, team: 'blue' },
+      { name: 'Zen', boostZero: 3, bpm: 440, team: 'blue' },
+      { name: 'Rw9', boostZero: 5, bpm: 400, team: 'orange' },
+      { name: 'Atow', boostZero: 7, bpm: 460, team: 'orange' },
+    ],
+    { blueGoals: 3, orangeGoals: 1 },
+  );
+
+  const match = replayToMatch(replay, { playerName: 'Vatira' });
+  assert.equal(match.players.length, 4, 'les deux rosters sont convertis');
+  assert.deepEqual(match.players.map((p) => p.team), [0, 0, 1, 1]);
+  assert.deepEqual(match.teamScores, { 0: 3, 1: 1 });
+  assert.equal(match.winner, 0);
+  assert.equal(match.result, 'win');
+  assert.equal(match.durationSeconds, 300);
+  assert.equal(match.externalId, 'bc-1');
+  assert.equal(match.ballchasingUrl, 'https://ballchasing.com/replay/bc-1');
+  assert.deepEqual(match.warnings, []);
+
+  const local = match.players.find((p) => p.isLocal);
+  assert.equal(local.name, 'Vatira');
+  assert.equal(local.stats.boost.bpm, 420, 'les stats ballchasing sont normalisées');
+
+  // alias : le joueur local est reconnu même sous un autre pseudo du même compte
+  const aliasReplay = replayFixture('bc-2', [
+    { name: 'L4rpey M00n', boostZero: 2, bpm: 420, team: 'blue', accountId: 'steam-m0nkey' },
+    { name: 'Zen', boostZero: 3, bpm: 440, team: 'blue' },
+    { name: 'Rw9', boostZero: 5, bpm: 400, team: 'orange' },
+    { name: 'Atow', boostZero: 7, bpm: 460, team: 'orange' },
+  ]);
+  const aliasMatch = replayToMatch(aliasReplay, { playerName: 'M0nkey M00n' });
+  assert.equal(aliasMatch.localPlayer, 'L4rpey M00n');
+  assert.equal(aliasMatch.players.filter((p) => p.isLocal).length, 1);
 });
 
 test('comparaison : le libellé de référence suit la cohorte (mono-joueur incluse)', () => {

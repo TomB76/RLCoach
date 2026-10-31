@@ -194,20 +194,28 @@ test('coachOverview : historique vide → message explicite', () => {
 });
 
 test('cohorte ballchasing : agrège les distributions depuis des replays', () => {
+  // Structure réelle de `GET /replays/{id}` : rosters dans blue/orange, buts
+  // d'équipe dans `<side>.stats.core.goals`, aucun tableau `players` racine.
   const replay = {
     id: 'r1',
     date: '2024-01-01T00:00:00Z',
     playlist: 'ranked-doubles',
     duration: 300,
     team_size: 2,
-    blue: { goals: 3 },
-    orange: { goals: 1 },
-    players: [
-      { name: 'Pro1', team: 'blue', stats: ballchasingStats({ percent_zero_boost: 2, bpm: 430 }) },
-      { name: 'Pro2', team: 'blue', stats: ballchasingStats({ percent_zero_boost: 4, bpm: 460 }) },
-      { name: 'Pro3', team: 'orange', stats: ballchasingStats({ percent_zero_boost: 6, bpm: 400 }) },
-      { name: 'Pro4', team: 'orange', stats: ballchasingStats({ percent_zero_boost: 8, bpm: 480 }) },
-    ],
+    blue: {
+      stats: { core: { goals: 3 } },
+      players: [
+        { name: 'Pro1', id: { platform: 'steam', id: 'p1' }, stats: ballchasingStats({ percent_zero_boost: 2, bpm: 430 }) },
+        { name: 'Pro2', id: { platform: 'steam', id: 'p2' }, stats: ballchasingStats({ percent_zero_boost: 4, bpm: 460 }) },
+      ],
+    },
+    orange: {
+      stats: { core: { goals: 1 } },
+      players: [
+        { name: 'Pro3', id: { platform: 'steam', id: 'p3' }, stats: ballchasingStats({ percent_zero_boost: 6, bpm: 400 }) },
+        { name: 'Pro4', id: { platform: 'steam', id: 'p4' }, stats: ballchasingStats({ percent_zero_boost: 8, bpm: 480 }) },
+      ],
+    },
   };
   const cohort = buildCohortFromReplays([replay], { playlist: 'ranked-doubles' });
   assert.equal(cohort.isDemo, false);
@@ -219,7 +227,10 @@ test('cohorte ballchasing : agrège les distributions depuis des replays', () =>
 });
 
 test('cohorte ballchasing : ignore les replays sans statistiques', () => {
-  const cohort = buildCohortFromReplays([{ id: 'x', duration: 300, players: [] }], { playlist: 'ranked-doubles' });
+  const cohort = buildCohortFromReplays(
+    [{ id: 'x', duration: 300, team_size: 2, blue: { players: [] }, orange: { players: [] } }],
+    { playlist: 'ranked-doubles' },
+  );
   assert.equal(cohort.replaysAnalyzed, 0);
   assert.deepEqual(cohort.metrics, {});
 });
