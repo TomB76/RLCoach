@@ -22,13 +22,26 @@ Le score global (`RL Coach score`) est la moyenne pondérée des performances fa
 
 ## Démarrage rapide
 
+### Windows : double-clic (le plus simple)
+
+| Fichier | Rôle |
+|---|---|
+| **`start-server.bat`** | lance l'app web complète sur http://localhost:4317 (installe les dépendances et reconstruit l'interface si nécessaire, puis ouvre le navigateur) |
+| **`start-dev.bat`** | mode développement : API sur 4317 + interface Vite avec hot reload sur http://localhost:5317 |
+
+Options communes : `rebuild` (force la reconstruction de l'interface) et `nobrowser` (n'ouvre pas le navigateur), ex. `start-server.bat rebuild nobrowser`.
+
+### En ligne de commande
+
 ```powershell
 cd C:\Users\Tom\Desktop\RlCoachApp
 npm install
-npm run dev
+npm run dev        # API 4317 + Vite 5317 (hot reload)
+# ou
+npm run build; npm start   # interface servie par le serveur sur le seul port 4317
 ```
 
-- Interface : http://localhost:5317
+- Interface : http://localhost:5317 (dev) ou http://localhost:4317 (après `npm start`)
 - API : http://localhost:4317/api/status
 
 Sans Rocket League lancé ni token ballchasing, l'app fonctionne quand même : clique sur **« Lancer une démo »** (match simulé, 2 profils disponibles) et la référence pro utilise des **repères de démarrage** clairement identifiés dans l'interface.
