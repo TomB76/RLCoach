@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildCohortFromReplays, cohortKey, replayToMatch, slugify } from '../src/ballchasing/cohort.js';
+import {
+  buildCohortFromReplays,
+  cohortKey,
+  mergeKnownPlayers,
+  replayToMatch,
+  slugify,
+} from '../src/ballchasing/cohort.js';
 import { buildSeedCohort } from '../src/coach/seedBenchmarks.js';
 import { coachMatch, coachOverview, compareToCohort } from '../src/coach/engine.js';
 import { buildSimulatedMatch } from '../src/rl/simulator.js';
@@ -559,4 +565,30 @@ test('IA : la narration générée est horodatée et traçable', async () => {
   assert.equal(result.provider, 'openai');
   assert.ok(result.generatedAt);
   assert.equal(result.promptVersion, 1);
+});
+
+test('liste des joueurs : seules les cohortes réellement mesurées sont marquées', () => {
+  // L'index global contient tous les joueurs des replays agrégés (y compris des
+  // inconnus, cf. filtre pro de ballchasing) : il ne suffit pas à proposer une
+  // référence. Une cohorte n'existe qu'après une récupération par pseudo.
+  const index = [
+    { name: 'Mr_Efficiency', id: 'epic:1', replays: 12, matches: 12, lastSeen: '2024-05-01' },
+    { name: 'M0nkey M00n', id: 'steam:2', replays: 9, matches: 9, lastSeen: '2024-05-02' },
+  ];
+  const entries = [
+    { key: 'cohort:ranked-doubles', value: { playerIndex: index, updatedAt: '2024-05-02T00:00:00Z' } },
+    { key: 'cohort:ranked-doubles:player:m0nkey-m00n', value: { player: 'M0nkey M00n', replaysAnalyzed: 9 } },
+    { key: 'cohort:ranked-doubles:player:zen', value: { player: 'Zen', replaysAnalyzed: 4 } },
+  ];
+
+  const players = mergeKnownPlayers('ranked-doubles', index, entries);
+  const byName = new Map(players.map((entry) => [entry.name, entry]));
+
+  assert.equal(players.length, 3, 'les cohortes isolées rejoignent l’index global');
+  assert.equal(byName.get('M0nkey M00n').hasCohort, true);
+  assert.equal(byName.get('M0nkey M00n').cohortReplays, 9);
+  assert.equal(byName.get('Zen').hasCohort, true, 'cohorte construite hors échantillon global');
+  assert.equal(byName.get('Zen').cohortReplays, 4);
+  assert.equal(byName.get('Mr_Efficiency').hasCohort, false, 'vu dans des replays ≠ cohorte mesurée');
+  assert.deepEqual(players.slice(0, 2).map((entry) => entry.name), ['M0nkey M00n', 'Zen'], 'tri par cohorte');
 });

@@ -227,6 +227,11 @@ export function getProCache(key) {
   return proCache()[key] || null;
 }
 
+/** Toutes les entrées du cache pro : sert à lister les cohortes disponibles. */
+export function listProCacheEntries() {
+  return Object.entries(proCache()).map(([key, value]) => ({ key, value }));
+}
+
 export function setProCache(key, value) {
   const store = proCache();
   store[key] = value;

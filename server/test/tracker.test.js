@@ -226,24 +226,49 @@ test('tracker : sortir du jeu libre relance une détection normale', () => {
   assert.ok(tracker.finalize({ Winner: 0 }), 'le match suivant doit être finalisé');
 });
 
-test('tracker : passer en jeu libre en cours de match abandonne les données', () => {
+test('tracker : forfait + retour rapide au menu enregistre le match', () => {
   const tracker = new MatchTracker({ playerName: 'Toi' });
-  let ended = 0;
-  tracker.onMatchEnded = () => {
-    ended += 1;
+  let final = null;
+  tracker.onMatchEnded = (match) => {
+    final = match;
   };
 
-  tracker.ingest(matchCreatedMessage('m3'));
-  for (let i = 1; i <= 30; i += 1) tracker.ingest(updateStateFrame({ time: i, begunPlay: true }));
-  assert.equal(tracker.snapshot().active, true, 'le match doit d’abord être actif');
+  tracker.ingest(matchCreatedMessage('ff'));
+  for (let i = 1; i <= 200; i += 1) {
+    tracker.ingest(updateStateFrame({ time: i, begunPlay: true, score: [1, 3] }));
+  }
 
-  // Retour au jeu libre sans MatchEnded : les données partielles sont jetées.
-  for (let i = 31; i <= 40; i += 1) tracker.ingest(updateStateFrame({ time: i, begunPlay: false }));
-  const snapshot = tracker.snapshot();
-  assert.equal(snapshot.freeplay, true);
-  assert.equal(snapshot.active, false);
-  assert.equal(snapshot.players.length, 0, 'les stats du match interrompu sont effacées');
+  // Fin de partie : le jeu remet bReplicatedHasBegunPlay à false (écran de fin,
+  // retour au menu) avant d'annoncer la destruction du match. Ces frames ne
+  // doivent pas effacer la partie en cours.
+  for (let i = 201; i <= 205; i += 1) {
+    tracker.ingest(updateStateFrame({ time: i, begunPlay: false }));
+  }
+  tracker.ingest({ Event: 'MatchDestroyed', Data: '{}' });
 
+  assert.ok(final, 'le match doit être enregistré malgré les frames de fin de partie');
+  assert.equal(final.durationSeconds, 200, 'la durée reste celle de la partie jouée');
+  assert.deepEqual(final.teamScores, { 0: 1, 1: 3 });
+  assert.equal(final.players.length, 2);
+  assert.equal(final.result, 'loss');
+});
+
+test('tracker : après un match finalisé, le jeu libre repart d’un état vierge', () => {
+  const tracker = new MatchTracker({ playerName: 'Toi' });
+  let ended = null;
+  tracker.onMatchEnded = (match) => {
+    ended = match;
+  };
+
+  tracker.ingest(matchCreatedMessage('m4'));
+  for (let i = 1; i <= 90; i += 1) tracker.ingest(updateStateFrame({ time: i, begunPlay: true }));
   tracker.ingest({ Event: 'MatchEnded', Data: JSON.stringify({ Winner: 0 }) });
-  assert.equal(ended, 0, 'aucun match ne doit être enregistré depuis le jeu libre');
+  assert.ok(ended, 'le match est finalisé');
+
+  for (let i = 1; i <= 10; i += 1) tracker.ingest(updateStateFrame({ time: i, begunPlay: false }));
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.freeplay, true, 'la session suivante est bien du jeu libre');
+  assert.equal(snapshot.active, false);
+  assert.equal(snapshot.players.length, 0, 'les données du match précédent sont effacées');
+  assert.equal(tracker.finalize({}), null);
 });

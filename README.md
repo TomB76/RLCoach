@@ -74,7 +74,7 @@ Réglages → **Import de replay** : le fichier est envoyé à ballchasing (visi
 
 ## Coach global ou coach d'un pro précis
 
-Deux références, sélectionnables dans **Réglages → Référence de coaching** :
+Deux références, choisies sur la page **Référence pro** : c'est le seul endroit où la référence se règle (le changement est enregistré et déclenche la réanalyse ; les réglages ne la gèrent plus).
 
 | Mode | Ce qui est comparé | Quand l'utiliser |
 |---|---|---|
@@ -85,7 +85,8 @@ Changer de référence réanalyse tout l'historique (le nombre de matchs recalcu
 
 Deux garde-fous d'honnêteté :
 - un joueur **sans données** est signalé explicitement (`playerAvailable: false`) : l'app retombe sur les repères de démarrage au lieu de faire croire à une comparaison réelle ;
-- la fiabilité de l'échantillon est exposée (`quality` : `low` < 5 replays, `fair` < 15, `good` au-delà) : des percentiles sur 3 matchs restent grossiers.
+- la fiabilité de l'échantillon est exposée (`quality` : `low` < 5 replays, `fair` < 15, `good` au-delà) : des percentiles sur 3 matchs restent grossiers ;
+- la liste de sélection ne propose que les **cohortes réellement mesurées** (joueurs dont on a déjà récupéré les replays) : apparaître dans la cohorte globale ne suffit pas, car le filtre `pro` de ballchasing ne garantit pas que tous les joueurs d'un replay sont pros.
 
 ## Coach IA (optionnel)
 
@@ -171,7 +172,8 @@ WebSocket /live + REST ◀──────────────────
 - Détection des gros/petits pads approximée par le delta de jauge de boost.
 - Les repères de démarrage (`source: seed`) sont des ordres de grandeur par mode, pas une cohorte mesurée : l'interface l'indique explicitement et invite à actualiser via ballchasing.
 - Pas de détection de rang (l'API Stats ne le fournit pas), donc un seul référentiel pro par mode.
-- **Jeu libre** : l'API Stats diffuse aussi le freeplay. Le tracker le reconnaît (`bReplicatedHasBegunPlay === false`), n'accumule aucune statistique, jette les données partielles et ne crée aucun match. Le cockpit affiche alors « Jeu libre détecté ». Si le champ est absent (versions du jeu qui ne l'envoient pas), la détection de partie reste inchangée.
+- **Jeu libre** : l'API Stats diffuse aussi le freeplay. Le tracker le reconnaît (`bReplicatedHasBegunPlay === false`), n'accumule aucune statistique et ne crée aucun match. Le cockpit affiche alors « Jeu libre détecté ». Si le champ est absent (versions du jeu qui ne l'envoient pas), la détection de partie reste inchangée.
+- **Fin de partie** : le même champ repasse à `false` pendant l'écran de fin, le replay du but ou le retour au menu. Tant qu'une partie réelle est ouverte, ces frames ne détruisent rien : le match reste intact et est finalisé par `MatchEnded` / `MatchDestroyed` — indispensable après un forfait suivi d'un retour rapide au menu.
 - **Référence mono-joueur par alias** : ballchasing peut afficher un même compte sous plusieurs pseudos (« M0nkey M00n » → « L4rpey M00n », « SH33PY M00N »). La résolution se fait par nom exact, puis par similarité de pseudo pour les identifiants du même compte (seuil 0,5). Si rien ne correspond, l'erreur liste les pseudos réellement rencontrés.
 
 ---

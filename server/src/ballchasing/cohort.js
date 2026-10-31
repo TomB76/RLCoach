@@ -12,7 +12,7 @@
  */
 
 import { BALLCHASING_MIN_INTERVAL_MS, PLAYLISTS } from '../config.js';
-import { getProCache, setProCache } from '../store.js';
+import { getProCache, listProCacheEntries, setProCache } from '../store.js';
 import { BallchasingClient } from './client.js';
 import { METRICS, metricValue, summarize } from '../coach/metrics.js';
 import { buildSeedCohort } from '../coach/seedBenchmarks.js';
@@ -504,21 +504,66 @@ export async function checkToken(token) {
  */
 export function listKnownPlayers(playlist = 'ranked-doubles') {
   const global = getProCache(cohortKey(playlist, 'global', null));
-  const index = global?.playerIndex || [];
-  const withCohort = index
-    .map((entry) => ({
-      ...entry,
-      hasCohort: Boolean(getProCache(cohortKey(playlist, 'player', entry.name))),
-      cohortReplays: getProCache(cohortKey(playlist, 'player', entry.name))?.replaysAnalyzed || 0,
-    }))
-    .sort((a, b) => b.replays - a.replays);
+  const players = mergeKnownPlayers(playlist, global?.playerIndex || [], listProCacheEntries());
   return {
     playlist,
     playlistLabel: PLAYLISTS[playlist]?.label || playlist,
     source: global ? 'cohorte globale' : 'aucune cohorte globale en cache',
     updatedAt: global?.updatedAt || null,
-    players: withCohort,
+    players,
   };
+}
+
+/**
+ * Fusionne l'index de la cohorte globale et les cohortes mono-joueur en cache.
+ *
+ * L'index global ne contient que les joueurs des replays agrégés : un joueur
+ * dont on a demandé la cohorte (recherche par nom) peut en être absent. Les
+ * deux sources sont donc réunies, et seules les cohortes réellement mesurées
+ * sont marquées `hasCohort` — le reste de l'index n'est pas une liste de pros.
+ */
+export function mergeKnownPlayers(playlist, index = [], entries = []) {
+  const prefix = `cohort:${playlist}:player:`;
+  const cachedBySlug = new Map();
+  for (const { key, value } of entries) {
+    if (!key || !key.startsWith(prefix) || !value) continue;
+    cachedBySlug.set(key.slice(prefix.length), value);
+  }
+
+  const byName = new Map();
+  for (const entry of index) {
+    if (!entry?.name) continue;
+    byName.set(entry.name, { ...entry, hasCohort: false, cohortReplays: 0, cohortUpdatedAt: null });
+  }
+
+  // 1) cohortes correspondant à un joueur de l'index global (résolution par slug)
+  for (const entry of byName.values()) {
+    const cached = cachedBySlug.get(slugify(entry.name));
+    if (!cached) continue;
+    entry.hasCohort = true;
+    entry.cohortReplays = Number(cached.replaysAnalyzed) || 0;
+    entry.cohortUpdatedAt = cached.updatedAt || null;
+  }
+
+  // 2) cohortes isolées : le joueur n'apparaît pas dans l'échantillon global
+  for (const cached of cachedBySlug.values()) {
+    const name = String(cached.player || '').trim();
+    if (!name || byName.has(name)) continue;
+    byName.set(name, {
+      name,
+      id: null,
+      replays: 0,
+      matches: 0,
+      lastSeen: cached.updatedAt || null,
+      hasCohort: true,
+      cohortReplays: Number(cached.replaysAnalyzed) || 0,
+      cohortUpdatedAt: cached.updatedAt || null,
+    });
+  }
+
+  return [...byName.values()].sort(
+    (a, b) => (b.cohortReplays || 0) - (a.cohortReplays || 0) || (b.replays || 0) - (a.replays || 0),
+  );
 }
 
 /**

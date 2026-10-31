@@ -18,25 +18,31 @@ const SOURCE_LABELS = {
 const SIZES = [20, 40, 80, 120];
 
 export default function ProReferenceView() {
-  const { status, playlists, dataVersion, proRefresh, refreshPro } = useAppData();
+  const { status, playlists, dataVersion, proRefresh, refreshPro, saveSettings, bumpData } = useAppData();
   const toast = useToast();
-  const [playlist, setPlaylist] = useState(null);
-  const [mode, setMode] = useState(null);
+  // Plus de doublon : la référence enregistrée côté serveur est l'unique source
+  // de vérité, et cet écran est le seul endroit où on la choisit. Les états
+  // locaux ne servent qu'à la saisie en cours.
+  const [editMode, setEditMode] = useState(null);
   const [playerDraft, setPlayerDraft] = useState(null);
-  const [playerQuery, setPlayerQuery] = useState(null);
   const [size, setSize] = useState(40);
   const [busy, setBusy] = useState(false);
+  const [applying, setApplying] = useState(false);
 
   const activeRef = status?.ballchasing?.reference || { mode: 'global', player: null, label: 'Pros (cohorte globale)' };
-  const scope = playlist || status?.settings?.targetPlaylist || 'ranked-doubles';
-  const effectiveMode = mode || activeRef.mode || 'global';
-  const effectivePlayer = playerQuery ?? activeRef.player ?? '';
+  const scope = status?.settings?.targetPlaylist || 'ranked-doubles';
+  const effectiveMode = activeRef.mode === 'player' ? 'player' : 'global';
+  const effectivePlayer = activeRef.player || '';
+  const draftMode = editMode || effectiveMode;
   const draftPlayer = playerDraft ?? effectivePlayer;
   const tokenSet = Boolean(status?.ballchasing?.tokenSet);
 
   const playersRes = useApiResource((signal) => api.proPlayers({ playlist: scope }, signal), [scope, dataVersion]);
   const known = playersRes.data?.players || [];
   const suggestions = playersRes.data?.suggestions || [];
+  // On ne propose que les joueurs dont une cohorte a déjà été mesurée : les
+  // autres pseudos de la cohorte globale ne sont pas des pros (cf. pro=true).
+  const measured = known.filter((entry) => entry.hasCohort);
 
   const res = useApiResource(
     async (signal) => {
@@ -75,14 +81,69 @@ export default function ProReferenceView() {
 
   const running = Boolean(refresh?.running);
   const progressPercent = refresh?.total ? Math.min(100, ((refresh.done || 0) / refresh.total) * 100) : 0;
-  const isActiveReference =
-    activeRef.mode === effectiveMode &&
-    (effectiveMode === 'global' ||
-      String(activeRef.player || '').toLowerCase() === String(effectivePlayer).toLowerCase());
+  const draftApplied =
+    draftMode === effectiveMode &&
+    (draftMode === 'global' ||
+      String(draftPlayer).trim().toLowerCase() === String(effectivePlayer).trim().toLowerCase());
 
-  function applyPlayer(name) {
-    setPlayerDraft(name);
-    setPlayerQuery(name);
+  /** Applique et enregistre la référence : le seul geste de décision de l'app. */
+  async function applyPlayer(name) {
+    const clean = String(name || '').trim();
+    if (!clean) return;
+    setApplying(true);
+    try {
+      const result = await saveSettings({ referenceMode: 'player', referencePlayer: clean });
+      setPlayerDraft(clean);
+      setEditMode('player');
+      bumpData();
+      const reanalyzed = Number(result?.reanalyzed) || 0;
+      toast.push({
+        kind: 'success',
+        title: 'Référence appliquée',
+        message:
+          reanalyzed > 0
+            ? `${reanalyzed} match(s) réanalysés avec « ${clean} ». Récupère ses replays pour construire sa cohorte.`
+            : `« ${clean} » est désormais la référence de coaching.`,
+      });
+    } catch (error) {
+      toast.push({ kind: 'error', title: 'Changement de référence impossible', message: error.message });
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  /** Change le type de référence : la cohorte globale s'applique tout de suite. */
+  async function applyMode(value) {
+    if (value !== 'global') {
+      setEditMode('player');
+      if (!playerDraft && effectivePlayer) setPlayerDraft(effectivePlayer);
+      return;
+    }
+    setEditMode('global');
+    setApplying(true);
+    try {
+      await saveSettings({ referenceMode: 'global' });
+      bumpData();
+      toast.push({ kind: 'success', title: 'Référence appliquée', message: 'Cohorte globale : tous les pros agrégés.' });
+    } catch (error) {
+      toast.push({ kind: 'error', title: 'Changement de référence impossible', message: error.message });
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  /** Change le mode de jeu comparé : enregistré, donc réanalysé. */
+  async function applyPlaylist(value) {
+    if (value === scope) return;
+    setApplying(true);
+    try {
+      await saveSettings({ targetPlaylist: value });
+      bumpData();
+    } catch (error) {
+      toast.push({ kind: 'error', title: 'Changement de mode impossible', message: error.message });
+    } finally {
+      setApplying(false);
+    }
   }
 
   async function handleRefresh() {
@@ -119,7 +180,13 @@ export default function ProReferenceView() {
           <div className="head-status">
             <div className="field field--inline">
               <label className="field__label" htmlFor="pro-playlist">Mode</label>
-              <select id="pro-playlist" className="input input--sm" value={scope} onChange={(event) => setPlaylist(event.target.value)}>
+              <select
+                id="pro-playlist"
+                className="input input--sm"
+                value={scope}
+                disabled={applying}
+                onChange={(event) => applyPlaylist(event.target.value)}
+              >
                 {Object.entries(playlists || {}).map(([key, entry]) => (
                   <option key={key} value={key}>{entry.label}</option>
                 ))}
@@ -132,31 +199,23 @@ export default function ProReferenceView() {
 
       <Card>
         <CardHead
-          title="Référence affichée"
+          title="Référence appliquée"
           icon="pro"
-          hint="Choisis la référence à consulter : les distributions ci-dessous en découlent."
+          hint="C’est la base de comparaison utilisée par le coach sur tout ton historique ; le changement est enregistré."
           actions={
             <div className="head-status">
-              <Badge tone={isActiveReference ? 'ok' : 'warn'} dot>
-                active : {activeRef.label || (activeRef.mode === 'player' ? activeRef.player : 'Pros (cohorte globale)')}
+              <Badge tone={draftApplied ? 'ok' : 'warn'} dot>
+                {draftApplied ? 'active' : 'non appliquée'} :{' '}
+                {activeRef.label || (effectiveMode === 'player' ? effectivePlayer : 'Pros (cohorte globale)')}
               </Badge>
-              {!isActiveReference ? (
-                <a className="btn btn--ghost btn--sm" href="#/reglages">
-                  <Icon name="settings" size={15} />
-                  <span>Définir comme référence</span>
-                </a>
-              ) : null}
             </div>
           }
         />
 
         <Segmented
           label="Type de référence"
-          value={effectiveMode}
-          onChange={(value) => {
-            setMode(value);
-            setPlayerQuery(null);
-          }}
+          value={draftMode}
+          onChange={applyMode}
           options={[
             { value: 'global', label: 'Cohorte globale', hint: 'tous les pros' },
             { value: 'player', label: 'Joueur pro', hint: 'un seul joueur' },
@@ -190,26 +249,38 @@ export default function ProReferenceView() {
               </datalist>
             </div>
             <div className="field">
-              <label className="field__label" htmlFor="pro-player-known">Pros connus</label>
+              <label className="field__label" htmlFor="pro-player-known">
+                Joueurs avec une cohorte mesurée ({num(measured.length, 0)})
+              </label>
               <select
                 id="pro-player-known"
                 className="input"
-                value={known.some((entry) => entry.name === draftPlayer) ? draftPlayer : ''}
+                value={measured.some((entry) => entry.name === draftPlayer) ? draftPlayer : ''}
                 onChange={(event) => {
                   if (event.target.value) applyPlayer(event.target.value);
                 }}
-                disabled={!known.length}
+                disabled={!measured.length || applying}
               >
-                <option value="">{known.length ? 'Choisir un pro…' : 'Aucun pro en cache (token requis)'}</option>
-                {known.map((entry) => (
+                <option value="">{measured.length ? 'Choisir un joueur…' : 'Aucune cohorte de joueur mesurée'}</option>
+                {measured.map((entry) => (
                   <option key={entry.name} value={entry.name}>
-                    {entry.name} — {num(entry.cohortReplays ?? entry.replays, 0)} replay{(entry.cohortReplays ?? entry.replays) > 1 ? 's' : ''}
+                    {entry.name} — {num(entry.cohortReplays ?? 0, 0)} replay{(entry.cohortReplays ?? 0) > 1 ? 's' : ''}
                   </option>
                 ))}
               </select>
+              <p className="field__hint">
+                Uniquement les joueurs déjà analysés pour ce mode. Les autres noms du champ de saisie sont des suggestions
+                de pseudos, pas des cohortes.
+              </p>
             </div>
-            <Button variant="primary" icon="check" onClick={() => applyPlayer(draftPlayer.trim())} disabled={!draftPlayer.trim()}>
-              Afficher
+            <Button
+              variant="primary"
+              icon="check"
+              loading={applying}
+              onClick={() => applyPlayer(draftPlayer.trim())}
+              disabled={!draftPlayer.trim()}
+            >
+              Définir comme référence
             </Button>
           </div>
         ) : null}
@@ -217,10 +288,11 @@ export default function ProReferenceView() {
         {playersRes.error ? (
           <Banner tone="danger" title="Impossible de lister les pros connus">{playersRes.error}</Banner>
         ) : null}
-        {!playersRes.loading && !known.length && playersRes.data?.source ? (
+        {!playersRes.loading && !measured.length ? (
           <p className="hint-text">
-            Liste des pros : {playersRes.data.source}. Ajoute un token ballchasing puis lance une actualisation globale pour
-            connaître les joueurs disponibles.
+            Aucun joueur n'a de cohorte mesurée pour ce mode
+            {playersRes.data?.updatedAt ? ` (cohorte globale mise à jour ${relative(playersRes.data.updatedAt)})` : ''}. Saisis
+            un pseudo ballchasing exact ci-dessus puis lance une actualisation : sa cohorte apparaîtra ensuite ici.
           </p>
         ) : null}
       </Card>
@@ -235,8 +307,8 @@ export default function ProReferenceView() {
         <Card>
           <EmptyState
             icon="pro"
-            title="Choisis un joueur pro"
-            description="Saisis un pseudo ballchasing ou sélectionne un pro déjà présent dans la cohorte globale pour afficher ses distributions."
+            title="Aucune référence active"
+            description="Choisis la cohorte globale ou saisis le pseudo ballchasing exact d'un joueur : la référence s'applique aussitôt à tout l'historique."
           />
         </Card>
       ) : null}
@@ -328,7 +400,7 @@ export default function ProReferenceView() {
               {running ? 'Actualisation en cours…' : effectiveMode === 'player' ? 'Actualiser ce joueur' : 'Actualiser la cohorte'}
             </Button>
           </div>
-          {refresh ? (
+          {refresh && (refresh.running || refresh.startedAt || refresh.error) ? (
             <div className="refresh">
               <div className="refresh__head">
                 <span>{running ? 'Analyse des replays…' : refresh.error ? 'Dernière actualisation en échec' : 'Dernière actualisation terminée'}</span>

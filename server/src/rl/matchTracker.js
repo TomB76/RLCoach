@@ -165,6 +165,8 @@ export class MatchTracker {
       gameTimeSeconds: 0,
       goals: [],
       finished: false,
+      // vrai dès qu'une frame de partie réelle est arrivée (voir enterFreeplay)
+      played: false,
     };
     this.lastTouchKey = null;
     this.possessionTeam = null;
@@ -291,9 +293,18 @@ export class MatchTracker {
 
   /**
    * Entre en jeu libre : aucune donnée n'est collectée et l'état accumulé est
-   * effacé, pour qu'une partie précédente ne soit ni finalisée ni polluée.
+   * effacé, pour qu'une session de freeplay ne soit ni finalisée ni polluée.
+   *
+   * Exception indispensable : dès qu'une partie réelle a été jouée et qu'elle
+   * n'est pas encore finalisée, `bReplicatedHasBegunPlay` repasse à `false`
+   * pendant l'écran de fin, le replay du but ou le retour au menu. Ces frames
+   * ne doivent rien effacer, sinon un forfait suivi d'un retour rapide au menu
+   * jette le match avant que le jeu n'annonce `MatchEnded` / `MatchDestroyed`.
    */
   enterFreeplay() {
+    if (this.match.played && this.match.players.size > 0 && !this.match.finished) {
+      return;
+    }
     if (this.match.players.size > 0 || this.match.gameTimeSeconds > 0) {
       this.reset();
     }
@@ -310,6 +321,9 @@ export class MatchTracker {
       return;
     }
     this.freeplay = false;
+    // Une frame « partie lancée » (où le champ est absent) marque le début
+    // effectif du jeu : le freeplay n'est alors plus possible pour ce match.
+    this.match.played = true;
     const time = safeNumber(game.TimeSeconds ?? game.Time ?? this.match.gameTimeSeconds, this.match.gameTimeSeconds);
     this.match.gameTimeSeconds = time;
     this.match.lastTimeSeconds = time;

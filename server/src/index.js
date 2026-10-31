@@ -180,7 +180,7 @@ function handleMatchCompleted(match) {
 
   saveMatch(match);
   console.log(
-    `[match] ${match.playlist} ${match.teamScores[0]}-${match.teamScores[1]} | score coach ${coaching.score} (${coaching.grade}) | ref ${comparison.referenceLabel}`,
+    `[match] ${match.playlist} ${match.teamScores[0]}-${match.teamScores[1]} | score coach ${coaching.score} (${coaching.grade}) | ref ${comparison?.referenceLabel || 'aucune (joueur local non identifié)'}`,
   );
   broadcast('match-completed', { match, summary: summaryOf(match), status: buildStatus() });
   emitLive(true);
@@ -199,7 +199,7 @@ function handleMatchCompleted(match) {
           model: result.model,
           generatedAt: result.generatedAt,
           promptVersion: result.promptVersion,
-          referenceLabel: comparison.referenceLabel || null,
+          referenceLabel: comparison?.referenceLabel || null,
         };
         saveMatch(match);
         broadcast('match-ai', { id: match.id, ai: match.ai });

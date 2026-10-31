@@ -4,7 +4,7 @@ import { useApiResource } from '../hooks/useApiResource.js';
 import { api, readFileAsBase64 } from '../api.js';
 import { useToast } from '../components/Toast.jsx';
 import { Badge, Banner, Button, Card, CardHead, ConfirmButton, PageHead, Spinner } from '../components/ui.jsx';
-import { ReferenceSection, AiSection } from '../components/settingsSections.jsx';
+import { AiSection } from '../components/settingsSections.jsx';
 import { Icon } from '../components/icons.jsx';
 import { dateTime, num } from '../format.js';
 import { PLAYLIST_FALLBACK } from '../metrics.js';
@@ -18,8 +18,6 @@ const FIELDS = [
   'autoConnect',
   'minMatchSeconds',
   'proCohortSize',
-  'referenceMode',
-  'referencePlayer',
   'aiProvider',
   'aiBaseUrl',
   'aiModel',
@@ -38,8 +36,6 @@ function toForm(settings) {
     autoConnect: Boolean(settings?.autoConnect),
     minMatchSeconds: String(settings?.minMatchSeconds ?? 60),
     proCohortSize: String(settings?.proCohortSize ?? 120),
-    referenceMode: settings?.referenceMode === 'player' ? 'player' : 'global',
-    referencePlayer: settings?.referencePlayer || '',
     aiProvider: settings?.aiProvider || 'none',
     aiBaseUrl: settings?.aiBaseUrl || '',
     aiModel: settings?.aiModel || '',
@@ -48,7 +44,7 @@ function toForm(settings) {
 }
 
 export default function SettingsView({ navigate }) {
-  const { saveSettings, clearHistory, dataVersion, status, refreshPro } = useAppData();
+  const { saveSettings, clearHistory, dataVersion, status } = useAppData();
   const toast = useToast();
   const res = useApiResource((signal) => api.getSettings(signal), [dataVersion]);
   const settings = res.data?.settings || status?.settings || null;
@@ -62,7 +58,6 @@ export default function SettingsView({ navigate }) {
   const [aiKey, setAiKey] = useState('');
   const [aiTesting, setAiTesting] = useState(false);
   const [aiTestResult, setAiTestResult] = useState(null);
-  const [busyAction, setBusyAction] = useState(null);
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState(null);
@@ -70,10 +65,6 @@ export default function SettingsView({ navigate }) {
   const [clearing, setClearing] = useState(false);
 
   const aiProviders = res.data?.aiProviders || [];
-  const playersRes = useApiResource((signal) => api.proPlayers({ playlist: form.targetPlaylist }, signal), [
-    form.targetPlaylist,
-    dataVersion,
-  ]);
   const aiRes = useApiResource((signal) => api.aiStatus(signal), [dataVersion]);
   const aiStatus = aiRes.data?.ai || status?.ai || null;
   const fileInputRef = useRef(null);
@@ -93,12 +84,6 @@ export default function SettingsView({ navigate }) {
   const tokenSet = Boolean(settings?.ballchasingTokenSet);
   const aiKeySet = Boolean(settings?.aiApiKeySet);
   const matchCount = status?.storage?.matchCount ?? 0;
-  const referenceInfo = res.data?.reference || status?.ballchasing?.reference || null;
-  const cohortInfo = status?.ballchasing?.cohort || null;
-  const referenceDirty =
-    form.referenceMode !== baseline.referenceMode ||
-    String(form.referencePlayer) !== String(baseline.referencePlayer);
-
   function update(key, value) {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
@@ -157,59 +142,6 @@ export default function SettingsView({ navigate }) {
       setTokenTesting(false);
     }
   }
-  async function handleApplyReference() {
-    setBusyAction('apply');
-    try {
-      const result = await saveSettings({
-        referenceMode: form.referenceMode,
-        referencePlayer: String(form.referencePlayer || '').trim(),
-      });
-      const next = toForm(result?.settings);
-      setBaseline((prev) => ({ ...prev, referenceMode: next.referenceMode, referencePlayer: next.referencePlayer }));
-      setForm((prev) => ({ ...prev, referenceMode: next.referenceMode, referencePlayer: next.referencePlayer }));
-      const reanalyzed = Number(result?.reanalyzed) || 0;
-      const appliedLabel =
-        result?.status?.ballchasing?.reference?.label ||
-        result?.reference?.label ||
-        (next.referenceMode === 'player' ? next.referencePlayer || 'joueur pro' : 'cohorte globale');
-      toast.push({
-        kind: 'success',
-        title: 'Référence appliquée',
-        message:
-          reanalyzed > 0
-            ? `${reanalyzed} match(s) réanalysés avec « ${appliedLabel} ».`
-            : 'Aucun match à réanalyser pour le moment.',
-      });
-    } catch (error) {
-      toast.push({ kind: 'error', title: 'Changement de référence impossible', message: error.message });
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
-  async function handleRefreshPlayer() {
-    const player = String(form.referencePlayer || '').trim();
-    if (!player) return;
-    setBusyAction('player-refresh');
-    try {
-      await refreshPro({
-        playlist: form.targetPlaylist,
-        mode: 'player',
-        player,
-        size: Number(form.proCohortSize) || 40,
-      });
-      toast.push({
-        kind: 'info',
-        title: 'Actualisation lancée',
-        message: `Récupération des replays de ${player} : la progression s’affiche sur la page Référence pro.`,
-      });
-    } catch (error) {
-      toast.push({ kind: 'error', title: 'Actualisation impossible', message: error.message });
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
   async function handleTestAi() {
     setAiTesting(true);
     setAiTestResult(null);
@@ -295,24 +227,6 @@ export default function SettingsView({ navigate }) {
             </div>
           </div>
         </Card>
-        <ReferenceSection
-          form={form}
-          update={update}
-          playlists={playlists}
-          reference={status?.ballchasing?.reference || referenceInfo}
-          cohortLabel={cohortInfo?.label}
-          playerAvailable={cohortInfo?.playerAvailable ?? null}
-          players={playersRes.data}
-          playersLoading={playersRes.loading}
-          playersError={playersRes.error}
-          tokenSet={tokenSet}
-          busy={busyAction}
-          referenceDirty={referenceDirty}
-          onApply={handleApplyReference}
-          onRefreshPlayer={handleRefreshPlayer}
-          targetPlaylist={form.targetPlaylist}
-        />
-
         <Card>
           <CardHead
             title="Token ballchasing"
