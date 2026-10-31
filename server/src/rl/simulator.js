@@ -1,5 +1,5 @@
 /**
- * Simulateur de flux « API Stats » � permet de faire tourner l'app et les tests
+ * Simulateur de flux « API Stats » : permet de faire tourner l'app et les tests
  * sans lancer Rocket League. Les messages produits ont exactement la même forme
  * que ceux du jeu : `{ Event, Data }` où `Data` est une chaîne JSON.
  *

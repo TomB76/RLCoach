@@ -145,6 +145,10 @@ export function AppDataProvider({ children }) {
         });
         return;
       }
+      if (type === 'match-ai') {
+        bumpData();
+        return;
+      }
       if (type === 'pro-refresh') {
         setProRefresh(payload || null);
         if (payload?.running === false) {

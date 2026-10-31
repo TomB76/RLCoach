@@ -104,6 +104,21 @@ export class BallchasingClient {
     return data?.list || [];
   }
 
+  /**
+   * Liste les replays d'un joueur précis (filtre `player-name` de l'API).
+   * Sert à construire la référence « prendre X comme coach ».
+   */
+  async listPlayerReplays({ playlist = 'ranked-doubles', count = 40, playerName = '', pro = true } = {}) {
+    const params = new URLSearchParams();
+    params.set('player-name', String(playerName));
+    params.set('playlist', playlist);
+    params.set('count', String(Math.min(200, Math.max(1, count))));
+    params.set('sort', 'replay-date-desc');
+    if (pro) params.set('pro', 'true');
+    const data = await this.request(`/replays?${params.toString()}`);
+    return data?.list || [];
+  }
+
   /** Détail d'un replay (stats par joueur). */
   async getReplay(id) {
     return this.request(`/replays/${id}`);

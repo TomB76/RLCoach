@@ -1,15 +1,14 @@
 /**
- * Construction et cache de la cohorte pro (distributions par métrique),
- * à partir des replays professionnels de ballchasing.com.
+ * Construction et cache des références pro.
  *
- * Stratégie :
- *  1. lister les derniers replays « pro » du mode voulu ;
- *  2. récupérer chaque replay pour obtenir les stats de chaque joueur ;
- *  3. agréger les métriques et calculer les quantiles (p10 → p90) ;
- *  4. mettre la cohorte en cache sur disque (data/pro-cache.json).
+ * Deux modes de référence :
+ *  - « global »  : cohorte agrégée de tous les joueurs pros analysés (coach global) ;
+ *  - « player »  : cohorte mono-joueur, calculée uniquement sur ses propres replays.
  *
- * Sans token / sans réseau, on retombe sur les repères de démarrage
- * (seedBenchmarks.js), clairement identifiés comme tels dans l'UI.
+ * Dans les deux cas on stocke des distributions (p10 → p90) par métrique, ce qui
+ * permet de comparer un match exactement de la même façon.
+ *
+ * Les clés de métriques suivent ballchasing (`boost.percentZeroBoost`…).
  */
 
 import { BALLCHASING_MIN_INTERVAL_MS, PLAYLISTS } from '../config.js';
@@ -25,6 +24,8 @@ const MAX_REPLAYS_PER_REFRESH = 60;
 export const refreshState = {
   running: false,
   playlist: null,
+  mode: 'global',
+  player: null,
   done: 0,
   total: 0,
   error: null,
@@ -33,24 +34,55 @@ export const refreshState = {
   source: null,
 };
 
-function cacheKey(playlist) {
-  return `cohort:${playlist}`;
+/** Identifiant de cache stable pour un nom de joueur. */
+export function slugify(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
 }
 
-/** Cohortede secours : repères de démarrage. */
-export function fallbackCohort(playlist) {
-  return buildSeedCohort(playlist || 'ranked-doubles');
+export function normalizeName(value) {
+  return String(value || '').trim().toLowerCase();
 }
 
 /**
- * Retourne la cohorte pro d'un mode : cache valide, sinon repères de démarrage.
+ * Clé de cache d'une référence.
+ * - global  → `cohort:<playlist>`
+ * - joueur  → `cohort:<playlist>:player:<slug>`
  */
-export function getCohort(playlist = 'ranked-doubles', { allowStale = true } = {}) {
-  const cached = getProCache(cacheKey(playlist));
-  if (cached && (allowStale || !isStale(cached))) return cached;
-  return fallbackCohort(playlist);
+export function cohortKey(playlist, mode = 'global', player = null) {
+  if (mode === 'player' && player) return `cohort:${playlist}:player:${slugify(player)}`;
+  return `cohort:${playlist}`;
 }
 
+/** Référence de secours : repères de démarrage, marqués comme tels. */
+export function fallbackCohort(playlist, { mode = 'global', player = null } = {}) {
+  const seed = buildSeedCohort(playlist || 'ranked-doubles');
+  return {
+    ...seed,
+    mode,
+    player: mode === 'player' ? player : null,
+    label: mode === 'player' ? `${player} (aucun replay analysé)` : 'Pros — repères de démarrage',
+    playerAvailable: mode === 'player' ? false : null,
+  };
+}
+
+/**
+ * Retourne la référence active : cache valide, sinon repères de démarrage.
+ */
+export function getCohort(playlist = 'ranked-doubles', { mode = 'global', player = null, allowStale = true } = {}) {
+  const key = cohortKey(playlist, mode, player);
+  const cached = getProCache(key);
+  if (cached && (allowStale || !isStale(cached))) {
+    return { ...cached, mode, player: mode === 'player' ? player : null };
+  }
+  return fallbackCohort(playlist, { mode, player });
+}
+
+/** Indique si une cohorte est absente ou trop ancienne. */
 export function isStale(cohort) {
   if (!cohort?.updatedAt) return true;
   return Date.now() - new Date(cohort.updatedAt).getTime() > CACHE_TTL_MS;
@@ -58,11 +90,23 @@ export function isStale(cohort) {
 
 /**
  * Agrège une liste de replays ballchasing en une cohorte de distributions.
+ *
+ * @param {object[]} replays replays ballchasing (avec `players[].stats`)
+ * @param {object} options
+ * @param {string} options.playlist
+ * @param {string} [options.source]
+ * @param {'global'|'player'} [options.mode]
+ * @param {string|null} [options.playerName] si fourni, on ne garde que ce joueur
  */
-export function buildCohortFromReplays(replays, { playlist, source = 'ballchasing' } = {}) {
+export function buildCohortFromReplays(
+  replays,
+  { playlist, source = 'ballchasing', mode = 'global', playerName = null } = {},
+) {
   const buckets = new Map(METRICS.map((metric) => [metric.key, []]));
-  const players = new Set();
+  const players = new Map(); // id/nom → { name, replays:Set, teamSize }
+  const target = playerName ? normalizeName(playerName) : null;
   let usableReplays = 0;
+  let playerMatchCount = 0;
   const replayIndex = [];
 
   for (const replay of replays) {
@@ -77,15 +121,33 @@ export function buildCohortFromReplays(replays, { playlist, source = 'ballchasin
     for (const player of roster) {
       const raw = player?.stats;
       if (!raw?.core || !raw?.movement || !raw?.positioning) continue;
+
+      const name = String(player.name || '').trim();
+      const isTarget = target ? normalizeName(name) === target : true;
       const stats = normalizeBallchasingStats(raw, duration);
-      for (const metric of METRICS) {
-        if (teamSize === 1 && metric.key === 'positioning.avgDistanceToTeammates') continue;
-        if (teamSize === 1 && metric.key === 'core.assistsPerMinute') continue;
-        const value = metricValue(metric, stats, duration);
-        if (Number.isFinite(value)) buckets.get(metric.key).push(value);
+
+      if (isTarget) {
+        for (const metric of METRICS) {
+          if (teamSize === 1 && metric.key === 'positioning.avgDistanceToTeammates') continue;
+          if (teamSize === 1 && metric.key === 'core.assistsPerMinute') continue;
+          const value = metricValue(metric, stats, duration);
+          if (Number.isFinite(value)) buckets.get(metric.key).push(value);
+        }
+        counted = true;
+        if (target) playerMatchCount += 1;
       }
-      players.add(player.id || player.name);
-      counted = true;
+
+      // index des joueurs rencontrés (sert au sélecteur de coach)
+      if (name) {
+        const key = normalizeName(name);
+        if (!players.has(key)) {
+          players.set(key, { name, id: player.id || null, replays: new Set(), matches: 0, lastSeen: null });
+        }
+        const entry = players.get(key);
+        entry.replays.add(replay.id);
+        if (isTarget) entry.matches += 1;
+        if (!entry.lastSeen || String(replay.date) > String(entry.lastSeen)) entry.lastSeen = replay.date;
+      }
     }
 
     if (counted) {
@@ -109,41 +171,93 @@ export function buildCohortFromReplays(replays, { playlist, source = 'ballchasin
     metrics[metric.key] = summary;
     sampleSize = Math.max(sampleSize, summary.count);
   }
-
   const totalSamples = Object.values(metrics).reduce((acc, m) => acc + (m.count || 0), 0);
+
+  const playerIndex = [...players.values()]
+    .map((entry) => ({
+      name: entry.name,
+      id: entry.id,
+      replays: entry.replays.size,
+      matches: entry.matches,
+      lastSeen: entry.lastSeen,
+    }))
+    .sort((a, b) => b.replays - a.replays);
+
+  const isPlayerMode = mode === 'player';
+  const label = isPlayerMode ? playerName : 'Pros (cohorte globale)';
+
+  /**
+   * Fiabilité de l'échantillon : une cohorte mono-joueur peut reposer sur peu de
+   * replays, ce qui rend les percentiles grossiers. On l'expose explicitement.
+   */
+  const quality = usableReplays >= 15 ? 'good' : usableReplays >= 5 ? 'fair' : 'low';
+  const qualityNote =
+    quality === 'good'
+      ? ''
+      : quality === 'fair'
+        ? ' Échantillon modéré : les percentiles restent indicatifs.'
+        : ' Échantillon faible : interprète les percentiles avec prudence (idéalement 15 replays ou plus).';
+
+  const note =
+    (isPlayerMode
+      ? `Référence mono-joueur : ${usableReplays} replay(s) de ${playerName} (${playerMatchCount} performance(s) mesurée(s)).`
+      : `Cohorte globale construite sur ${usableReplays} replays pro (${players.size} joueurs) récupérés via l'API ballchasing.`) +
+    qualityNote;
 
   return {
     playlist,
     playlistLabel: PLAYLISTS[playlist]?.label || playlist,
     source,
+    mode,
+    player: isPlayerMode ? playerName : null,
+    label,
+    quality,
+    playerAvailable: isPlayerMode ? usableReplays > 0 : null,
     isDemo: false,
     updatedAt: new Date().toISOString(),
     sampleSize: totalSamples,
-    playersAnalyzed: players.size,
+    playersAnalyzed: isPlayerMode ? new Set([normalizeName(playerName)]).size : players.size,
     replaysAnalyzed: usableReplays,
     replays: replayIndex,
+    playerIndex,
     metrics,
-    note: `Cohorte construite sur ${usableReplays} replays pro (${players.size} joueurs) récupérés via l'API ballchasing.`,
+    note,
   };
 }
 
 /**
- * Rafraîchit la cohorte depuis ballchasing. Écrit dans le cache disque.
+ * Rafraîchit une référence depuis ballchasing (tâche appelée par l'API).
+ *
  * @param {object} params
- * @param {string} params.token token API ballchasing (ou chaîne vide)
+ * @param {string} params.token token API ballchasing
  * @param {string} params.playlist
  * @param {number} params.size nombre de replays à analyser
+ * @param {'global'|'player'} [params.mode]
+ * @param {string|null} [params.player]
  * @param {(progress: object) => void} [params.onProgress]
  */
-export async function refreshCohort({ token = '', playlist = 'ranked-doubles', size = 30, onProgress = null } = {}) {
+export async function refreshCohort({
+  token = '',
+  playlist = 'ranked-doubles',
+  size = 30,
+  mode = 'global',
+  player = null,
+  onProgress = null,
+} = {}) {
   if (refreshState.running) {
     return { ok: false, error: 'Une actualisation est déjà en cours.' };
+  }
+  const isPlayerMode = mode === 'player';
+  if (isPlayerMode && !String(player || '').trim()) {
+    return { ok: false, error: 'Indique le nom du joueur pro à analyser.' };
   }
   const count = Math.max(5, Math.min(MAX_REPLAYS_PER_REFRESH, Number(size) || 30));
 
   Object.assign(refreshState, {
     running: true,
     playlist,
+    mode,
+    player: isPlayerMode ? player : null,
     done: 0,
     total: count,
     error: null,
@@ -157,19 +271,31 @@ export async function refreshCohort({ token = '', playlist = 'ranked-doubles', s
   try {
     const notify = () => onProgress?.({ ...refreshState });
 
-    let list = await client.listProReplays({ playlist, count });
-    let source = 'ballchasing:pro';
-
-    if (!list.length) {
-      // Repli : pas de matchs étiquetés pro → on prend les plus hauts rangs.
-      list = await client.listProReplays({ playlist, count, pro: false, minRank: 'grand-champion' });
-      source = 'ballchasing:grand-champion';
-    }
-
-    if (!list.length) {
-      throw new Error(
-        "Aucun replay trouvé sur ballchasing pour ce mode. Vérifie le token et le mode sélectionné.",
-      );
+    let list;
+    let source;
+    if (isPlayerMode) {
+      list = await client.listPlayerReplays({ playlist, count, playerName: player, pro: true });
+      source = 'ballchasing:player-pro';
+      if (!list.length) {
+        list = await client.listPlayerReplays({ playlist, count, playerName: player, pro: false });
+        source = 'ballchasing:player-any';
+      }
+      if (!list.length) {
+        throw new Error(
+          `Aucun replay trouvé pour « ${player} » en ${PLAYLISTS[playlist]?.label || playlist}. Vérifie l'orthographe exacte du pseudo (tel qu'il apparaît sur ballchasing).`,
+        );
+      }
+    } else {
+      list = await client.listProReplays({ playlist, count });
+      source = 'ballchasing:pro';
+      if (!list.length) {
+        // Repli : pas de matchs étiquetés pro → on prend les plus hauts rangs.
+        list = await client.listProReplays({ playlist, count, pro: false, minRank: 'grand-champion' });
+        source = 'ballchasing:grand-champion';
+      }
+      if (!list.length) {
+        throw new Error("Aucun replay trouvé sur ballchasing pour ce mode. Vérifie le token et le mode sélectionné.");
+      }
     }
 
     refreshState.total = Math.min(count, list.length);
@@ -188,12 +314,22 @@ export async function refreshCohort({ token = '', playlist = 'ranked-doubles', s
       notify();
     }
 
-    const cohort = buildCohortFromReplays(replays, { playlist, source });
+    const cohort = buildCohortFromReplays(replays, {
+      playlist,
+      source,
+      mode,
+      playerName: isPlayerMode ? player : null,
+    });
+
     if (!cohort.replaysAnalyzed) {
-      throw new Error("Les replays récupérés ne contiennent pas assez de statistiques exploitables.");
+      throw new Error(
+        isPlayerMode
+          ? `Les replays récupérés ne contiennent pas de statistiques exploitables pour « ${player} ».`
+          : "Les replays récupérés ne contiennent pas assez de statistiques exploitables.",
+      );
     }
 
-    setProCache(cacheKey(playlist), cohort);
+    setProCache(cohortKey(playlist, mode, player), cohort);
     Object.assign(refreshState, {
       running: false,
       finishedAt: new Date().toISOString(),
@@ -225,6 +361,29 @@ export async function checkToken(token) {
 }
 
 /**
+ * Joueurs pros connus pour un mode, d'après la cohorte globale en cache.
+ * Sert de source au sélecteur « prendre X comme coach ».
+ */
+export function listKnownPlayers(playlist = 'ranked-doubles') {
+  const global = getProCache(cohortKey(playlist, 'global', null));
+  const index = global?.playerIndex || [];
+  const withCohort = index
+    .map((entry) => ({
+      ...entry,
+      hasCohort: Boolean(getProCache(cohortKey(playlist, 'player', entry.name))),
+      cohortReplays: getProCache(cohortKey(playlist, 'player', entry.name))?.replaysAnalyzed || 0,
+    }))
+    .sort((a, b) => b.replays - a.replays);
+  return {
+    playlist,
+    playlistLabel: PLAYLISTS[playlist]?.label || playlist,
+    source: global ? 'cohorte globale' : 'aucune cohorte globale en cache',
+    updatedAt: global?.updatedAt || null,
+    players: withCohort,
+  };
+}
+
+/**
  * Convertit un replay ballchasing (uploadé ou récupéré) en match analysable
  * par le moteur de coaching.
  */
@@ -242,9 +401,7 @@ export function replayToMatch(replay, { playerName = '', playlistHint = null } =
       id: player.id || player.name,
       name: player.name,
       team,
-      isLocal: Boolean(
-        playerName && String(player.name).toLowerCase() === String(playerName).toLowerCase(),
-      ),
+      isLocal: Boolean(playerName && normalizeName(player.name) === normalizeName(playerName)),
       stats,
       rlCoachScore: null,
       grade: null,
@@ -279,7 +436,7 @@ export function replayToMatch(replay, { playerName = '', playlistHint = null } =
   };
 }
 
-/** Normalise les stats ballchasing (déjà au bon format) et complète ce qui manque. */
+/** Normalise les stats ballchasing (snake_case) au format interne. */
 function normalizeBallchasingStats(stats = {}, duration = 0) {
   return {
     core: {

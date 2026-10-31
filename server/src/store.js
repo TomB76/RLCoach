@@ -58,11 +58,13 @@ export function getSettings() {
 /** Version expédiable au navigateur : le token est remplacé par un booléen. */
 export function getPublicSettings() {
   const s = getSettings();
-  const { ballchasingToken, ...rest } = s;
+  const { ballchasingToken, aiApiKey, ...rest } = s;
   return {
     ...rest,
     ballchasingToken: '',
     ballchasingTokenSet: Boolean(ballchasingToken && ballchasingToken.trim()),
+    aiApiKey: '',
+    aiApiKeySet: Boolean(aiApiKey && aiApiKey.trim()),
   };
 }
 
@@ -87,8 +89,16 @@ export function updateSettings(patch = {}) {
       next.transport = value === 'tcp' ? 'tcp' : 'ws';
       continue;
     }
-    if (key === 'autoConnect') {
-      next.autoConnect = Boolean(value);
+    if (key === 'autoConnect' || key === 'aiAuto') {
+      next[key] = value === true || value === 'true';
+      continue;
+    }
+    if (key === 'referenceMode') {
+      next.referenceMode = value === 'player' ? 'player' : 'global';
+      continue;
+    }
+    if (key === 'aiProvider') {
+      next.aiProvider = ['openai', 'ollama', 'custom'].includes(value) ? value : 'none';
       continue;
     }
     if (value === null || value === undefined) continue;
@@ -102,6 +112,23 @@ export function updateSettings(patch = {}) {
 export function getBallchasingToken() {
   const token = getSettings().ballchasingToken;
   return token && token.trim() ? token.trim() : '';
+}
+
+export function getAiKey() {
+  const key = getSettings().aiApiKey;
+  return key && key.trim() ? key.trim() : '';
+}
+
+/** Configuration IA effective (clé incluse) — usage serveur uniquement. */
+export function getAiConfig() {
+  const s = getSettings();
+  return {
+    provider: s.aiProvider || 'none',
+    baseUrl: (s.aiBaseUrl || '').trim(),
+    model: (s.aiModel || '').trim(),
+    apiKey: getAiKey(),
+    auto: Boolean(s.aiAuto),
+  };
 }
 
 // ---------------------------------------------------------------------------

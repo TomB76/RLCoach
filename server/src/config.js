@@ -55,6 +55,25 @@ export const DEFAULT_SETTINGS = {
   minMatchSeconds: 60,
   /** Objectif : nombre de matchs à analyser pour un cycle de coaching. */
   matchesPerCycle: 10,
+
+  /**
+   * Référence de coaching :
+   * - 'global' : cohorte agrégée de tous les pros (coach global)
+   * - 'player' : un seul joueur pro, calculé uniquement sur ses replays
+   */
+  referenceMode: 'global',
+  referencePlayer: '',
+
+  /**
+   * Coach IA optionnel (API compatible OpenAI chat/completions).
+   * Aucun appel n'est fait sans configuration explicite.
+   */
+  aiProvider: 'none', // none | openai | ollama | custom
+  aiBaseUrl: process.env.AI_BASE_URL || '',
+  aiModel: process.env.AI_MODEL || '',
+  aiApiKey: process.env.AI_API_KEY || '',
+  /** Génère l'analyse IA automatiquement à la fin de chaque match. */
+  aiAuto: false,
 };
 
 export function envDefaults() {

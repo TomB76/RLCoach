@@ -1,10 +1,12 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useApiResource } from '../hooks/useApiResource.js';
 import { api } from '../api.js';
 import { Badge, Banner, Button, Card, CardHead, EmptyState, PageHead, Skeleton, SkeletonBlock } from '../components/ui.jsx';
 import { Icon } from '../components/icons.jsx';
 import { ScoreGauge } from '../components/charts.jsx';
 import { MetricCompareRow, PlayerStatsTable, RecommendationCard, StrengthList } from '../components/coach.jsx';
+import { AiCoachCard } from '../components/ai.jsx';
+import { useToast } from '../components/Toast.jsx';
 import { clock, dateTime, durationLabel, num, relative, EMPTY } from '../format.js';
 import { METRIC_GROUPS, playlistLabel } from '../metrics.js';
 import { useAppData } from '../hooks/useAppData.jsx';
@@ -16,11 +18,42 @@ const RESULT = {
 };
 
 export default function MatchDetailView({ id, navigate }) {
-  const { playlists } = useAppData();
+  const { playlists, status } = useAppData();
+  const toast = useToast();
   const res = useApiResource((signal) => api.match(id, signal), [id]);
+  const [aiOverride, setAiOverride] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState(null);
   const match = res.data?.match || null;
   const coaching = match?.coaching || null;
   const comparison = match?.comparison || null;
+
+  const aiEnabled = Boolean(status?.ai?.enabled);
+  const aiReason = status?.ai?.reason || null;
+  const ai = aiOverride || match?.ai || null;
+  const referenceLabel =
+    comparison?.referenceLabel ||
+    comparison?.cohort?.label ||
+    status?.ballchasing?.reference?.label ||
+    'Pros';
+
+  async function handleGenerateAi() {
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const result = await api.matchAi(id);
+      setAiOverride(result?.ai || null);
+      toast.push({
+        kind: 'success',
+        title: 'Débriefing généré',
+        message: result?.ai?.model ? `Rédigé par ${result.ai.provider} · ${result.ai.model}.` : undefined,
+      });
+    } catch (error) {
+      setAiError(error.message);
+    } finally {
+      setAiLoading(false);
+    }
+  }
 
   const groups = useMemo(() => {
     const map = new Map();
@@ -81,6 +114,7 @@ export default function MatchDetailView({ id, navigate }) {
               <span className="badge__sub">ton équipe : {mine === 0 ? 'bleue' : 'orange'}</span>
             </Badge>
             <Badge tone="neutral">durée {clock(match.durationSeconds)}</Badge>
+            <Badge tone="accent" title="Base de comparaison utilisée pour ce match">Réf. : {referenceLabel}</Badge>
           </div>
         }
       />
@@ -105,7 +139,7 @@ export default function MatchDetailView({ id, navigate }) {
               {coaching?.summary ? <p className="hero-score__summary">{coaching.summary}</p> : null}
               <div className="hero-score__badges">
                 {coaching?.playerName ? <Badge tone="accent">{coaching.playerName}</Badge> : null}
-                {comparison?.cohort?.isDemo ? <Badge tone="warn">référence de démarrage</Badge> : <Badge tone="ok">cohorte pro</Badge>}
+                <Badge tone={comparison?.cohort?.isDemo ? 'warn' : 'ok'}>Référence : {referenceLabel}</Badge>
               </div>
             </div>
           </div>
@@ -188,6 +222,16 @@ export default function MatchDetailView({ id, navigate }) {
           />
         )}
       </Card>
+
+      <AiCoachCard
+        ai={ai}
+        loading={aiLoading}
+        error={aiError}
+        enabled={aiEnabled}
+        reason={aiReason}
+        onGenerate={handleGenerateAi}
+        idleDescription={`Le coach IA reformule le diagnostic de ce match (référence : ${referenceLabel}) en un débriefing de coach.`}
+      />
 
       <Card>
         <CardHead title="Contexte technique" />

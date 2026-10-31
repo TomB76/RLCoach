@@ -49,6 +49,11 @@ export default function CockpitView({ navigate }) {
   const stats = local?.stats || {};
   const active = Boolean(snapshot?.active);
 
+  const referenceMode = status?.ballchasing?.reference?.mode || 'global';
+  const referencePlayer = status?.ballchasing?.reference?.player || null;
+  const referenceShort = referenceMode === 'player' ? referencePlayer || 'Joueur pro' : 'Pros';
+  const referenceFull = status?.ballchasing?.reference?.label || (referenceMode === 'player' ? `${referencePlayer} (joueur unique)` : 'Pros (cohorte globale)');
+
   const overviewRes = useApiResource((signal) => api.overview({ limit: 15 }, signal), [dataVersion]);
   const overview = overviewRes.data?.overview || null;
   const priority = overview?.priorities?.[0] || null;
@@ -146,6 +151,9 @@ export default function CockpitView({ navigate }) {
               {socketState === 'open' ? 'WebSocket live' : 'Polling 2 s'}
             </Badge>
             <Badge tone="neutral">{num(status?.storage?.matchCount, 0)} matchs analysés</Badge>
+            <Badge tone={referenceMode === 'player' ? 'accent' : 'info'} title={`Référence de comparaison : ${referenceFull}`}>
+              Réf. : {referenceShort}
+            </Badge>
           </div>
         }
       />

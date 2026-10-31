@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useAppData } from '../hooks/useAppData.jsx';
 import { useApiResource } from '../hooks/useApiResource.js';
 import { api } from '../api.js';
@@ -8,19 +8,52 @@ import { Radar, ScoreGauge, Sparkline } from '../components/charts.jsx';
 import { OverviewMetricsTable, RecommendationCard } from '../components/coach.jsx';
 import { durationLabel, metric as fmtMetric, num, relative } from '../format.js';
 import { METRIC_GROUPS, METRIC_GROUP_ORDER, playlistLabel } from '../metrics.js';
+import { AiCoachCard } from '../components/ai.jsx';
+import { useToast } from '../components/Toast.jsx';
 
 const DIRECTION = { up: { icon: 'arrowUp', tone: 'ok', label: 'en progression' }, down: { icon: 'arrowDown', tone: 'danger', label: 'en baisse' }, flat: { icon: 'flat', tone: 'neutral', label: 'stable' } };
 
 export default function CoachView() {
   const { status, playlists, dataVersion } = useAppData();
+  const toast = useToast();
   const [playlist, setPlaylist] = useState(null);
   const [groupFilter, setGroupFilter] = useState('all');
   const [hideNeutral, setHideNeutral] = useState(false);
+  const [ai, setAi] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState(null);
 
   const scope = playlist || status?.settings?.targetPlaylist || 'ranked-doubles';
   const res = useApiResource((signal) => api.overview({ limit: 15, playlist: scope }, signal), [scope, dataVersion]);
   const overview = res.data?.overview || null;
   const loading = res.loading && !overview;
+  const aiEnabled = Boolean(status?.ai?.enabled);
+  const aiReason = status?.ai?.reason || null;
+  const referenceLabel =
+    overview?.referenceLabel || status?.ballchasing?.cohort?.label || status?.ballchasing?.reference?.label || 'Pros';
+
+  useEffect(() => {
+    setAi(null);
+    setAiError(null);
+  }, [scope]);
+
+  async function handleGenerateOverviewAi() {
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const result = await api.overviewAi({ playlist: scope, limit: 15 });
+      setAi(result?.ai || null);
+      toast.push({
+        kind: 'success',
+        title: 'Point de coach généré',
+        message: result?.ai?.model ? `Rédigé par ${result.ai.provider} · ${result.ai.model}.` : undefined,
+      });
+    } catch (error) {
+      setAiError(error.message);
+    } finally {
+      setAiLoading(false);
+    }
+  }
 
   const axes = useMemo(() => {
     const metrics = overview?.metrics || [];
@@ -187,6 +220,20 @@ export default function CoachView() {
               </div>
             </Card>
           ) : null}
+
+          <AiCoachCard
+            title="Point de coach (IA)"
+            hint="Synthèse rédigée à partir du diagnostic des 15 derniers matchs : la référence et les chiffres restent ceux du moteur déterministe."
+            ai={ai}
+            loading={aiLoading}
+            error={aiError}
+            enabled={aiEnabled}
+            reason={aiReason}
+            onGenerate={handleGenerateOverviewAi}
+            idleLabel="Générer le point de coach (IA)"
+            regenerateLabel="Régénérer le point de coach"
+            idleDescription={`Le coach IA rédige une synthèse de ta progression sur ce mode (référence : ${referenceLabel}).`}
+          />
 
           {overview.priorities?.length ? (
             <Card>

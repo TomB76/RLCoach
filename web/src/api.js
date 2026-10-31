@@ -87,8 +87,15 @@ export const api = {
   overview: ({ limit = 15, playlist } = {}, signal) =>
     request(`/api/coach/overview${query({ limit, playlist })}`, { signal }),
 
-  proReference: (playlist, signal) => request(`/api/pro/reference${query({ playlist })}`, { signal }),
+  proPlayers: ({ playlist } = {}, signal) => request(`/api/pro/players${query({ playlist })}`, { signal }),
+  proReference: ({ playlist, mode, player } = {}, signal) =>
+    request(`/api/pro/reference${query({ playlist, mode, player })}`, { signal }),
   refreshPro: (body) => request('/api/pro/refresh', { method: 'POST', body }),
+
+  aiStatus: (signal) => request('/api/ai/status', { signal }),
+  testAi: (body) => request('/api/ai/test', { method: 'POST', body }),
+  matchAi: (id) => request(`/api/matches/${encodeURIComponent(id)}/ai`, { method: 'POST', body: {} }),
+  overviewAi: (body) => request('/api/coach/ai/overview', { method: 'POST', body }),
 
   importReplay: (body) => request('/api/replays/import', { method: 'POST', body }),
 };

@@ -35,7 +35,11 @@ if (!match) {
   process.exit(1);
 }
 
-const cohort = getCohort(playlist);
+const reference =
+  settings.referenceMode === 'player' && settings.referencePlayer
+    ? { mode: 'player', player: settings.referencePlayer }
+    : { mode: 'global', player: null };
+const cohort = getCohort(playlist, reference);
 const { comparison, coaching } = coachMatch({ match, cohort });
 const local = match.players.find((p) => p.isLocal);
 

@@ -4,11 +4,29 @@ import { useApiResource } from '../hooks/useApiResource.js';
 import { api, readFileAsBase64 } from '../api.js';
 import { useToast } from '../components/Toast.jsx';
 import { Badge, Banner, Button, Card, CardHead, ConfirmButton, PageHead, Spinner } from '../components/ui.jsx';
+import { ReferenceSection, AiSection } from '../components/settingsSections.jsx';
 import { Icon } from '../components/icons.jsx';
 import { dateTime, num } from '../format.js';
 import { PLAYLIST_FALLBACK } from '../metrics.js';
 
-const FIELDS = ['playerName', 'targetPlaylist', 'host', 'port', 'transport', 'autoConnect', 'minMatchSeconds', 'proCohortSize'];
+const FIELDS = [
+  'playerName',
+  'targetPlaylist',
+  'host',
+  'port',
+  'transport',
+  'autoConnect',
+  'minMatchSeconds',
+  'proCohortSize',
+  'referenceMode',
+  'referencePlayer',
+  'aiProvider',
+  'aiBaseUrl',
+  'aiModel',
+  'aiAuto',
+];
+
+const NUMERIC_FIELDS = ['port', 'minMatchSeconds', 'proCohortSize'];
 
 function toForm(settings) {
   return {
@@ -20,11 +38,17 @@ function toForm(settings) {
     autoConnect: Boolean(settings?.autoConnect),
     minMatchSeconds: String(settings?.minMatchSeconds ?? 60),
     proCohortSize: String(settings?.proCohortSize ?? 120),
+    referenceMode: settings?.referenceMode === 'player' ? 'player' : 'global',
+    referencePlayer: settings?.referencePlayer || '',
+    aiProvider: settings?.aiProvider || 'none',
+    aiBaseUrl: settings?.aiBaseUrl || '',
+    aiModel: settings?.aiModel || '',
+    aiAuto: Boolean(settings?.aiAuto),
   };
 }
 
 export default function SettingsView({ navigate }) {
-  const { saveSettings, clearHistory, dataVersion, status } = useAppData();
+  const { saveSettings, clearHistory, dataVersion, status, refreshPro } = useAppData();
   const toast = useToast();
   const res = useApiResource((signal) => api.getSettings(signal), [dataVersion]);
   const settings = res.data?.settings || status?.settings || null;
@@ -35,11 +59,23 @@ export default function SettingsView({ navigate }) {
   const [token, setToken] = useState('');
   const [tokenTesting, setTokenTesting] = useState(false);
   const [tokenResult, setTokenResult] = useState(null);
+  const [aiKey, setAiKey] = useState('');
+  const [aiTesting, setAiTesting] = useState(false);
+  const [aiTestResult, setAiTestResult] = useState(null);
+  const [busyAction, setBusyAction] = useState(null);
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState(null);
   const [dragging, setDragging] = useState(false);
   const [clearing, setClearing] = useState(false);
+
+  const aiProviders = res.data?.aiProviders || [];
+  const playersRes = useApiResource((signal) => api.proPlayers({ playlist: form.targetPlaylist }, signal), [
+    form.targetPlaylist,
+    dataVersion,
+  ]);
+  const aiRes = useApiResource((signal) => api.aiStatus(signal), [dataVersion]);
+  const aiStatus = aiRes.data?.ai || status?.ai || null;
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -51,34 +87,57 @@ export default function SettingsView({ navigate }) {
 
   const dirty = useMemo(() => {
     if (Object.keys(baseline).some((key) => String(form[key]) !== String(baseline[key]))) return true;
-    return token.trim().length > 0;
-  }, [form, baseline, token]);
+    return token.trim().length > 0 || aiKey.trim().length > 0;
+  }, [form, baseline, token, aiKey]);
 
   const tokenSet = Boolean(settings?.ballchasingTokenSet);
+  const aiKeySet = Boolean(settings?.aiApiKeySet);
   const matchCount = status?.storage?.matchCount ?? 0;
+  const referenceInfo = res.data?.reference || status?.ballchasing?.reference || null;
+  const cohortInfo = status?.ballchasing?.cohort || null;
+  const referenceDirty =
+    form.referenceMode !== baseline.referenceMode ||
+    String(form.referencePlayer) !== String(baseline.referencePlayer);
 
   function update(key, value) {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
+  function buildPatch(keys) {
+    const patch = {};
+    for (const key of keys) {
+      if (String(form[key]) === String(baseline[key])) continue;
+      patch[key] = NUMERIC_FIELDS.includes(key) ? Number(form[key]) : form[key];
+    }
+    return patch;
+  }
+
   async function handleSave(event) {
     event.preventDefault();
-    const patch = {};
-    for (const key of FIELDS) {
-      if (String(form[key]) !== String(baseline[key])) {
-        patch[key] = key === 'port' || key === 'minMatchSeconds' || key === 'proCohortSize' ? Number(form[key]) : form[key];
-      }
-    }
+    const patch = buildPatch(FIELDS);
     if (token.trim()) patch.ballchasingToken = token.trim();
+    if (aiKey.trim()) patch.aiApiKey = aiKey.trim();
     if (!Object.keys(patch).length) return;
     setSaving(true);
     try {
       const result = await saveSettings(patch);
+      const next = toForm(result?.settings);
       setToken('');
-      setBaseline(toForm(result?.settings));
-      setForm(toForm(result?.settings));
+      setAiKey('');
       setTokenResult(null);
-      toast.push({ kind: 'success', title: 'Réglages enregistrés', message: 'Les changements sont appliqués immédiatement côté serveur.' });
+      setAiTestResult(null);
+      setBaseline(next);
+      setForm(next);
+      aiRes.reload();
+      const reanalyzed = Number(result?.reanalyzed) || 0;
+      toast.push({
+        kind: 'success',
+        title: 'Réglages enregistrés',
+        message:
+          reanalyzed > 0
+            ? `${reanalyzed} match(s) réanalysés avec la nouvelle référence.`
+            : 'Les changements sont appliqués immédiatement côté serveur.',
+      });
     } catch (error) {
       toast.push({ kind: 'error', title: 'Enregistrement impossible', message: error.message });
     } finally {
@@ -96,6 +155,76 @@ export default function SettingsView({ navigate }) {
       setTokenResult({ ok: false, message: error.message });
     } finally {
       setTokenTesting(false);
+    }
+  }
+  async function handleApplyReference() {
+    setBusyAction('apply');
+    try {
+      const result = await saveSettings({
+        referenceMode: form.referenceMode,
+        referencePlayer: String(form.referencePlayer || '').trim(),
+      });
+      const next = toForm(result?.settings);
+      setBaseline((prev) => ({ ...prev, referenceMode: next.referenceMode, referencePlayer: next.referencePlayer }));
+      setForm((prev) => ({ ...prev, referenceMode: next.referenceMode, referencePlayer: next.referencePlayer }));
+      const reanalyzed = Number(result?.reanalyzed) || 0;
+      const appliedLabel =
+        result?.status?.ballchasing?.reference?.label ||
+        result?.reference?.label ||
+        (next.referenceMode === 'player' ? next.referencePlayer || 'joueur pro' : 'cohorte globale');
+      toast.push({
+        kind: 'success',
+        title: 'Référence appliquée',
+        message:
+          reanalyzed > 0
+            ? `${reanalyzed} match(s) réanalysés avec « ${appliedLabel} ».`
+            : 'Aucun match à réanalyser pour le moment.',
+      });
+    } catch (error) {
+      toast.push({ kind: 'error', title: 'Changement de référence impossible', message: error.message });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleRefreshPlayer() {
+    const player = String(form.referencePlayer || '').trim();
+    if (!player) return;
+    setBusyAction('player-refresh');
+    try {
+      await refreshPro({
+        playlist: form.targetPlaylist,
+        mode: 'player',
+        player,
+        size: Number(form.proCohortSize) || 40,
+      });
+      toast.push({
+        kind: 'info',
+        title: 'Actualisation lancée',
+        message: `Récupération des replays de ${player} : la progression s’affiche sur la page Référence pro.`,
+      });
+    } catch (error) {
+      toast.push({ kind: 'error', title: 'Actualisation impossible', message: error.message });
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleTestAi() {
+    setAiTesting(true);
+    setAiTestResult(null);
+    try {
+      const payload = { provider: form.aiProvider };
+      if (form.aiBaseUrl) payload.baseUrl = form.aiBaseUrl;
+      if (form.aiModel) payload.model = form.aiModel;
+      if (aiKey.trim()) payload.apiKey = aiKey.trim();
+      const result = await api.testAi(payload);
+      const label = aiProviders.find((item) => item.id === (result?.provider || form.aiProvider))?.label;
+      setAiTestResult({ ok: true, provider: result?.provider, providerLabel: label, model: result?.model });
+    } catch (error) {
+      setAiTestResult({ ok: false, message: error.message });
+    } finally {
+      setAiTesting(false);
     }
   }
 
@@ -153,7 +282,7 @@ export default function SettingsView({ navigate }) {
               <p className="field__hint">Utilisé pour trouver ta ligne dans chaque match.</p>
             </div>
             <div className="field">
-              <label className="field__label" htmlFor="targetPlaylist">Mode de référence</label>
+              <label className="field__label" htmlFor="targetPlaylist">Mode de jeu de référence</label>
               <select id="targetPlaylist" className="input" value={form.targetPlaylist} onChange={(event) => update('targetPlaylist', event.target.value)}>
                 {Object.entries(playlists).map(([key, entry]) => (
                   <option key={key} value={key}>{entry.label}</option>
@@ -162,10 +291,27 @@ export default function SettingsView({ navigate }) {
                   ? Object.entries(PLAYLIST_FALLBACK).map(([key, entry]) => <option key={key} value={key}>{entry.label}</option>)
                   : null}
               </select>
-              <p className="field__hint">Cohorte pro et comparaison utilisées par défaut.</p>
+              <p className="field__hint">Mode utilisé pour la cohorte pro et les comparaisons.</p>
             </div>
           </div>
         </Card>
+        <ReferenceSection
+          form={form}
+          update={update}
+          playlists={playlists}
+          reference={status?.ballchasing?.reference || referenceInfo}
+          cohortLabel={cohortInfo?.label}
+          playerAvailable={cohortInfo?.playerAvailable ?? null}
+          players={playersRes.data}
+          playersLoading={playersRes.loading}
+          playersError={playersRes.error}
+          tokenSet={tokenSet}
+          busy={busyAction}
+          referenceDirty={referenceDirty}
+          onApply={handleApplyReference}
+          onRefreshPlayer={handleRefreshPlayer}
+          targetPlaylist={form.targetPlaylist}
+        />
 
         <Card>
           <CardHead
@@ -202,6 +348,18 @@ export default function SettingsView({ navigate }) {
             </Banner>
           ) : null}
         </Card>
+        <AiSection
+          form={form}
+          update={update}
+          providers={aiProviders}
+          apiKey={aiKey}
+          setApiKey={setAiKey}
+          keySet={aiKeySet}
+          aiStatus={aiStatus}
+          testing={aiTesting}
+          testResult={aiTestResult}
+          onTest={handleTestAi}
+        />
 
         <Card>
           <CardHead title="API Stats de Rocket League" hint="Le jeu expose ses statistiques en local quand il tourne." />

@@ -12,7 +12,7 @@ Coach Rocket League local : l'app analyse tes matchs, compare **tes statistiques
 |---|---|
 | 1. Captation | Connexion à l'**API Stats locale du jeu** (`rocketleague.com/developer/stats-api`) : le jeu diffuse le match en JSON sur `127.0.0.1:49123` (WebSocket ou TCP). |
 | 2. Analyse | Le tracker transforme ce flux en **21 métriques** alignées sur le schéma ballchasing : boost, mouvement, positionnement, production, démolitions, touches. |
-| 3. Référence pro | Les distributions pros (p10 → p90) sont récupérées via l'**API ballchasing** (`ballchasing.com/doc/api`) : replays étiquetés *pro*, un point de mesure par joueur et par match. |
+| 3. Référence pro | Au choix : **coach global** (tous les pros agrégés) ou **un pro précis**, dont seuls les replays comptent. Distributions p10 → p90 récupérées via l'**API ballchasing** (`ballchasing.com/doc/api`). |
 | 4. Diagnostic | Chaque métrique est positionnée en **percentile** dans la distribution pro, puis convertie en performance 0–100 (direction de la métrique respectée). |
 | 5. Coaching | Les faiblesses sont triées par **impact = poids métier × gravité de l'écart**, traduites en diagnostics, exercices et objectifs (palier p25 pro). |
 
@@ -59,6 +59,39 @@ Réglages → **Import de replay** : le fichier est envoyé à ballchasing (visi
 
 ---
 
+## Coach global ou coach d'un pro précis
+
+Deux références, sélectionnables dans **Réglages → Référence de coaching** :
+
+| Mode | Ce qui est comparé | Quand l'utiliser |
+|---|---|---|
+| **Global** (défaut) | cohorte agrégée de **tous** les pros analysés | vision « niveau pro moyen », statistiquement plus stable |
+| **Joueur pro** | uniquement **ses** replays (filtre `player-name`) | tu veux copier le style d'un joueur précis |
+
+Changer de référence réanalyse tout l'historique (le nombre de matchs recalculés est renvoyé et affiché).
+
+Deux garde-fous d'honnêteté :
+- un joueur **sans données** est signalé explicitement (`playerAvailable: false`) : l'app retombe sur les repères de démarrage au lieu de faire croire à une comparaison réelle ;
+- la fiabilité de l'échantillon est exposée (`quality` : `low` < 5 replays, `fair` < 15, `good` au-delà) : des percentiles sur 3 matchs restent grossiers.
+
+## Coach IA (optionnel)
+
+Le moteur déterministe (percentiles + règles) reste la **source de vérité**. L'IA ne fait que rédiger : elle reçoit les métriques déjà calculées et doit produire un débriefing, avec interdiction explicite d'inventer un chiffre.
+
+| Champ (Réglages → Coach IA) | Détail |
+|---|---|
+| Fournisseur | `OpenAI`, `Ollama` (local, sans clé), `API compatible OpenAI` (LM Studio, vLLM, OpenRouter…) ou désactivé |
+| URL de base | ex. `https://api.openai.com/v1`, `http://127.0.0.1:11434/v1` |
+| Modèle | ex. `gpt-4o-mini`, `llama3.1` |
+| Clé API | stockée dans `data/settings.json`, **jamais renvoyée au navigateur** (seul `keySet` l'indique) |
+| Auto | débriefing généré à la fin de chaque match |
+
+
+Le bouton **Tester** envoie une requête minimale avant d'enregistrer. Sans configuration explicite, **aucun appel réseau** n'est effectué (couvert par un test). Les récits sont stockés avec le match (`match.ai` : fournisseur, modèle, date, version de prompt).
+
+Ce que reçoit le modèle : les métriques déjà calculées (valeur, médiane pro, **fourchette p25–p75**, dispersion, position dans la fourchette, sens de la métrique), les forces/faiblesses, les recommandations et les objectifs. Aucun replay brut, aucun nom d'autre joueur, aucun identifiant technique. La fourchette p25–p75 sert au modèle à distinguer « dans la norme pro » d'un vrai écart ; le champ `sens` évite les contresens sur des métriques inversées (temps à 0 boost).
+---
+
 ## Commandes
 
 | Commande | Effet |
@@ -67,7 +100,7 @@ Réglages → **Import de replay** : le fichier est envoyé à ballchasing (visi
 | `npm run dev:server` / `npm run dev:web` | l'un ou l'autre |
 | `npm start` | serveur seul, sert `dist/` s'il existe |
 | `npm run build` | build de production de l'interface |
-| `npm test` | 17 tests (`node --test`) : tracker, moteur, cohorte, simulateur |
+| `npm test` | 32 tests (`node --test`) : tracker, moteur, cohortes (global/mono-joueur), IA |
 | `npm run simulate` | un match simulé en ligne de commande |
 
 ---
@@ -89,6 +122,8 @@ server/src/
   coach/rules.js            13 règles de coaching (diagnostic, drills, objectif)
   coach/engine.js           comparaison, score, priorisation, plan d'entraînement
   coach/seedBenchmarks.js   repères de démarrage par mode (marqués « démo »)
+  coach/ai.js               coach IA optionnel (prompts, appel OpenAI-compatible)
+  ballchasing/knownPlayers.js  suggestions de noms pros (aide à la saisie)
 web/src/                    interface React 19 (Vite), CSS maison, SVG inline
 server/test/                tests node:test
 ```
@@ -142,6 +177,10 @@ WebSocket /live + REST ◀──────────────────
 | `GET /api/pro/reference` `POST /api/pro/refresh` | cohorte pro |
 | `POST /api/replays/import` | import d'un `.replay` via ballchasing |
 | `WS /live` | `snapshot`, `status`, `match-completed`, `pro-refresh` |
+| `GET /api/pro/players` | pros connus (cohorte globale) + suggestions de noms |
+| `POST /api/matches/:id/ai` | débriefing IA d'un match (stocké dans `match.ai`) |
+| `POST /api/coach/ai/overview` | point de coach IA sur plusieurs matchs |
+| `GET /api/ai/status` `POST /api/ai/test` | configuration et test du fournisseur IA |
 
 ---
 

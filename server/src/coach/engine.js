@@ -117,11 +117,17 @@ export function compareToCohort({ stats, durationSeconds, cohort, playlist, team
   }
 
   const score = weightSum > 0 ? roundTo(scoreSum / weightSum, 1) : 50;
+  const referenceLabel = cohort?.label || 'Pros';
   return {
     playlist,
     playlistLabel: playlistLabel(playlist),
+    referenceLabel,
     cohort: {
       source: cohort?.source || 'unknown',
+      mode: cohort?.mode || 'global',
+      player: cohort?.player || null,
+      label: referenceLabel,
+      playerAvailable: cohort?.playerAvailable ?? null,
       isDemo: Boolean(cohort?.isDemo),
       updatedAt: cohort?.updatedAt || null,
       sampleSize: cohort?.sampleSize || 0,
@@ -179,6 +185,7 @@ export function buildRecommendations(comparison, { limit = MAX_RECOMMENDATIONS }
         percentile: row.percentile,
         performance: row.performance,
         playlistLabel: comparison.playlistLabel,
+        benchmarkLabel: comparison.referenceLabel || comparison.cohort?.label || 'Pros',
       }),
       why: rule.why,
       cue: rule.cue,
@@ -284,8 +291,15 @@ function buildHeadline(match, comparison, recommendations, local) {
 
 function buildSummary(comparison, recommendations, strengths, weaknesses) {
   const parts = [];
+  const reference = comparison.referenceLabel || comparison.cohort?.label || 'Pros';
   parts.push(
-    `Score global ${comparison.score}/100 face aux pros du ${comparison.playlistLabel} (${comparison.cohort.isDemo ? 'repères de démarrage' : `cohorte de ${comparison.cohort.sampleSize} performances pro`}).`,
+    `Score global ${comparison.score}/100 face à ${reference} en ${comparison.playlistLabel} (${
+      comparison.cohort.isDemo
+        ? 'repères de démarrage'
+        : comparison.cohort.mode === 'player'
+          ? `${comparison.cohort.replaysAnalyzed} replay(s) analysé(s)`
+          : `cohorte de ${comparison.cohort.sampleSize} performances pro`
+    }).`,
   );
   if (strengths.length) {
     parts.push(
@@ -327,9 +341,26 @@ export function coachOverview({ matches, cohort, playlist, limit = 15 }) {
     .sort((a, b) => String(a.date).localeCompare(String(b.date)))
     .slice(-limit);
 
+  const referenceLabel = cohort?.label || 'Pros';
+  const cohortPayload = {
+    source: cohort?.source || 'seed',
+    mode: cohort?.mode || 'global',
+    player: cohort?.player || null,
+    label: referenceLabel,
+    playerAvailable: cohort?.playerAvailable ?? null,
+    isDemo: Boolean(cohort?.isDemo),
+    updatedAt: cohort?.updatedAt || null,
+    sampleSize: cohort?.sampleSize || 0,
+    replaysAnalyzed: cohort?.replaysAnalyzed || 0,
+    playersAnalyzed: cohort?.playersAnalyzed || 0,
+    note: cohort?.note || null,
+  };
+
   if (!sorted.length) {
     return {
       scope: { matchCount: 0, playlist, playlistLabel: playlistLabel(playlist), minutes: 0 },
+      referenceLabel,
+      cohort: cohortPayload,
       score: null,
       grade: null,
       metrics: [],
@@ -443,6 +474,7 @@ export function coachOverview({ matches, cohort, playlist, limit = 15 }) {
       reference: candidate.metric.reference,
       performance: candidate.metric.avgPerformance,
       playlistLabel: playlistLabel(playlist),
+      benchmarkLabel: cohort?.label || 'Pros',
     }),
     why: candidate.rule.why,
     cue: candidate.rule.cue,
@@ -497,15 +529,8 @@ export function coachOverview({ matches, cohort, playlist, limit = 15 }) {
       wins: comparisons.filter((c) => c.match.result === 'win').length,
       losses: comparisons.filter((c) => c.match.result === 'loss').length,
     },
-    cohort: {
-      source: cohort?.source || 'seed',
-      isDemo: Boolean(cohort?.isDemo),
-      updatedAt: cohort?.updatedAt || null,
-      sampleSize: cohort?.sampleSize || 0,
-      replaysAnalyzed: cohort?.replaysAnalyzed || 0,
-      playersAnalyzed: cohort?.playersAnalyzed || 0,
-      note: cohort?.note || null,
-    },
+    referenceLabel,
+    cohort: cohortPayload,
     score,
     grade: gradeOf(score),
     level: levelOf(score),

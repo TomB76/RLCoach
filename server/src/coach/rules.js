@@ -15,7 +15,7 @@ export const RULES = [
     threshold: 45,
     title: 'Tu joues une grande partie du match sans boost',
     diagnosis: (c) =>
-      `Tu passes ${fmt(c.value, c.unit)} du temps à 0 boost, contre ${fmt(c.reference.p50, c.unit)} pour un pro (${c.playlistLabel}). Sans boost, tu ne peux ni contester en l'air, ni revenir en défense, ni finir une action.`,
+      `Tu passes ${fmt(c.value, c.unit)} du temps à 0 boost, contre ${fmt(c.reference.p50, c.unit)} pour un pro (${c.benchmarkLabel ?? c.playlistLabel}). Sans boost, tu ne peux ni contester en l'air, ni revenir en défense, ni finir une action.`,
     why: "Le boost n'est pas une ressource de confort : c'est ce qui te permet de gagner les duels aériens et de tenir ta rotation. Tomber à zéro signifie que tu n'as pas pris de pads pendant 10 à 20 secondes.",
     cue: 'Après chaque action, prends deux petits pads sur le chemin du retour.',
     drills: [
